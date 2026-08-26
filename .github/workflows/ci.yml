@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: jiangxt2/Tributo
+          path: Tributo
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.23"
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --all-packages --group dev
+      - run: uv run ruff format --check .
+      - run: uv run ruff check .
+      - run: uv run mypy packages
+      - run: uv run pytest tests
+      - run: uv build --all-packages

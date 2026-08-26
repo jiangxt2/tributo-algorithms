@@ -1,0 +1,34 @@
+name: Release package
+
+on:
+  push:
+    tags:
+      - "*-v*"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: jiangxt2/Tributo
+          path: Tributo
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.23"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Resolve package from tag
+        run: |
+          package="${GITHUB_REF_NAME%%-v*}"
+          test -f "packages/${package}/pyproject.toml"
+          echo "PACKAGE=${package}" >> "${GITHUB_ENV}"
+      - run: uv build --package "tributo-algorithms-${PACKAGE}"
+      - uses: pypa/gh-action-pypi-publish@release/v1

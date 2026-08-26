@@ -1,0 +1,22 @@
+[project]
+name = "tributo-algorithms-multistage-torch"
+version = "0.1.0"
+description = "Official finite multi-stage PyTorch algorithms for Tributo"
+requires-python = ">=3.12,<3.14"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "tributo[model-export-torch]>=1,<2",
+    "torch>=2.5",
+    "safetensors>=0.4.3",
+]
+
+[project.entry-points."tributo.algorithms"]
+pretrain_finetune_classifier = "tributo_algorithms_multistage_torch.pretrain_descriptor:PRETRAIN_FINETUNE_DESCRIPTOR"
+teacher_student_distillation = "tributo_algorithms_multistage_torch.descriptor:DISTILLATION_DESCRIPTOR"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tributo_algorithms_multistage_torch"]

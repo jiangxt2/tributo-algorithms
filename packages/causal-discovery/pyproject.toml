@@ -1,0 +1,24 @@
+[project]
+name = "tributo-algorithms-causal-discovery"
+version = "0.1.0"
+description = "Official distributed causal discovery algorithms for Tributo"
+requires-python = ">=3.12,<3.14"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "tributo>=1,<2",
+    "causal-learn>=0.1.4,<0.2",
+    "numpy>=2,<3",
+]
+
+[project.entry-points."tributo.algorithms"]
+pc_stability_discovery = "tributo_algorithms_causal_discovery.descriptor:PC_DISCOVERY_DESCRIPTOR"
+
+[project.entry-points."tributo.exporters"]
+official-causal-discovery-report-v1 = "tributo_algorithms_causal_discovery.exporter:CausalDiscoveryReportExporter"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tributo_algorithms_causal_discovery"]

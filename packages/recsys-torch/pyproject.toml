@@ -1,0 +1,21 @@
+[project]
+name = "tributo-algorithms-recsys-torch"
+version = "0.1.0"
+description = "Official distributed recommendation algorithms for Tributo"
+requires-python = ">=3.12,<3.14"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "tributo[model-export-torch]>=1,<2",
+    "torch>=2.5",
+]
+
+[project.entry-points."tributo.algorithms"]
+jagged_embedding_recommender = "tributo_algorithms_recsys_torch.jagged_descriptor:JAGGED_DESCRIPTOR"
+two_tower_recommender = "tributo_algorithms_recsys_torch.descriptor:TWO_TOWER_DESCRIPTOR"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tributo_algorithms_recsys_torch"]
