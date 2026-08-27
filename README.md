@@ -12,10 +12,11 @@ contracts, and algorithm-specific delivery plugins.
 
 | Package | Algorithms and roles |
 | --- | --- |
-| `classical` | Random Forest, Extra Trees, Logistic/Linear Regression, MultinomialNB |
-| `boosting` | Ray Train XGBoost, ONNX/UBJ export, native flavor |
+| `classical` | Random Forest, Extra Trees, Logistic/Linear Regression, MultinomialNB, PCA, KMeans, synchronous SGD, Isolation Forest |
+| `boosting` | Ray Train XGBoost and LightGBM, ONNX/UBJ export, native flavor |
 | `tabular-torch` | DNN, nnPU/uPU, PU prior and metric utilities |
-| `timeseries` | Temporal convolution classification |
+| `timeseries` | Temporal convolution, LSTM, and GRU classification |
+| `catboost` | Conditional distributed CatBoost ensemble |
 | `representation` | Distributed tabular autoencoder |
 | `transformers-nlp` | Pre-tokenized Transformer classification |
 | `graph-pyg` | GraphSAGE and relational R-GCN |

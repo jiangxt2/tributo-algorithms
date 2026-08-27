@@ -6,12 +6,14 @@ requires-python = ">=3.12,<3.14"
 license = { text = "Apache-2.0" }
 dependencies = [
     "tributo[model-export]>=1,<2",
+    "lightgbm>=4.5,<5",
     "xgboost>=2.1,<4",
     "onnxmltools>=1.13",
 ]
 
 [project.entry-points."tributo.algorithms"]
 "xgboost.framework_native" = "tributo_algorithms_boosting.descriptor:XGBOOST_DESCRIPTOR"
+"lightgbm.framework_native" = "tributo_algorithms_boosting.lightgbm_descriptor:LIGHTGBM_DESCRIPTOR"
 
 [project.entry-points."tributo.exporters"]
 official-xgboost-onnx-v1 = "tributo_algorithms_boosting.native:OfficialXGBoostONNXExporter"

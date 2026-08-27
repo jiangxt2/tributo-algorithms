@@ -22,6 +22,12 @@ dependencies = [
 "random_forest.native" = "tributo_algorithms_classical.descriptors:RANDOM_FOREST_NATIVE_DESCRIPTOR"
 "logistic_regression.iterative" = "tributo_algorithms_classical.descriptors:LOGISTIC_REGRESSION_DESCRIPTOR"
 multinomial_nb = "tributo_algorithms_classical.multinomial_nb_descriptor:MULTINOMIAL_NB_DESCRIPTOR"
+"pca.map_reduce" = "tributo_algorithms_classical.pca_descriptor:PCA_DESCRIPTOR"
+"kmeans.iterative" = "tributo_algorithms_classical.kmeans_descriptor:KMEANS_DESCRIPTOR"
+"kmeans_minibatch.iterative" = "tributo_algorithms_classical.kmeans_descriptor:MINIBATCH_KMEANS_DESCRIPTOR"
+"sgd_classifier.iterative" = "tributo_algorithms_classical.sgd_descriptor:SGD_CLASSIFIER_DESCRIPTOR"
+"sgd_regressor.iterative" = "tributo_algorithms_classical.sgd_descriptor:SGD_REGRESSOR_DESCRIPTOR"
+"isolation_forest.parallel_ensemble" = "tributo_algorithms_classical.isolation_forest_descriptor:ISOLATION_FOREST_DESCRIPTOR"
 
 [build-system]
 requires = ["hatchling"]

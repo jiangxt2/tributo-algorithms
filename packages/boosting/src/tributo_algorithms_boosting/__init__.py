@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from tributo_algorithms_boosting.descriptor import XGBOOST_DESCRIPTOR
+from tributo_algorithms_boosting.lightgbm_descriptor import LIGHTGBM_DESCRIPTOR
 
 _LAZY_EXPORTS = {
     "DistributedXGBoost": (
@@ -34,6 +35,7 @@ def __getattr__(name: str) -> Any:
 
 __all__ = [
     "DistributedXGBoost",
+    "LIGHTGBM_DESCRIPTOR",
     "XGBOOST_DESCRIPTOR",
     "XGBoostStageResult",
     "XGBoostStageRunner",

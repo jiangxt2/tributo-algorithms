@@ -13,6 +13,8 @@ dependencies = [
 
 [project.entry-points."tributo.algorithms"]
 temporal_conv_classifier = "tributo_algorithms_timeseries.descriptor:TEMPORAL_CONV_DESCRIPTOR"
+"lstm_classifier.recipe_v2" = "tributo_algorithms_timeseries.rnn_descriptor:LSTM_DESCRIPTOR"
+"gru_classifier.recipe_v2" = "tributo_algorithms_timeseries.rnn_descriptor:GRU_DESCRIPTOR"
 
 [build-system]
 requires = ["hatchling"]

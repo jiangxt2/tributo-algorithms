@@ -14,7 +14,16 @@ import sys
 
 from tributo.algorithms.conformance import validate_installed_algorithm_package
 
-heavy = {"causallearn", "dowhy", "torch", "torch_geometric", "transformers", "xgboost"}
+heavy = {
+    "catboost",
+    "causallearn",
+    "dowhy",
+    "lightgbm",
+    "torch",
+    "torch_geometric",
+    "transformers",
+    "xgboost",
+}
 before = heavy & set(sys.modules)
 reports = []
 for entry_point in importlib.metadata.entry_points(group="tributo.algorithms"):
@@ -44,4 +53,4 @@ print(json.dumps({"count": len(reports)}))
     )
 
     assert result.returncode == 0, result.stderr
-    assert '"count": 27' in result.stdout
+    assert '"count": 37' in result.stdout
