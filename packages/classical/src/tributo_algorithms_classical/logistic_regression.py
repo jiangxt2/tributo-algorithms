@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pickle
 from collections.abc import Iterable, Mapping
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from tributo.algorithms import IterativeOptimizationAlgorithm
@@ -200,7 +200,9 @@ class BinaryL2LogisticRegression(
         estimator.intercept_ = np.asarray(state["intercept"], dtype=np.float64)
         estimator.n_iter_ = np.asarray(state["round"], dtype=np.int32)
         estimator.n_features_in_ = int(np.asarray(state["feature_count"])[0])
-        feature_names = tuple(str(name) for name in state["feature_names"])
+        feature_names = tuple(
+            str(name) for name in cast(Iterable[object], state["feature_names"])
+        )
         estimator.C = 1.0 / float(np.asarray(state["regularization"])[0])
         return SklearnModel(estimator, feature_names, "classification")
 

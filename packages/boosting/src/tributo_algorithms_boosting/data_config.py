@@ -31,7 +31,7 @@ class CompleteCoverageDataConfig(DataConfig):
         # exclusion and locality behavior.
         from ray.data._internal.execution.interfaces import ExecutionResources
 
-        output = [{} for _ in range(world_size)]
+        output: list[dict[str, Any]] = [{} for _ in range(world_size)]
         for dataset_name, dataset in datasets.items():
             if dataset.name is None:
                 dataset.set_name(dataset_name)

@@ -836,8 +836,15 @@ def export_model(
     import numpy as np
     from skl2onnx import convert_sklearn
     from skl2onnx.common.data_types import FloatTensorType
+    from sklearn import __version__ as sklearn_version
     from sklearn.linear_model import LinearRegression
-    from tributo.exporting.models import BundleOutputConfig, ExportSource, ExportTarget
+    from tributo.exporting.models import (
+        BundleOutputConfig,
+        CheckpointField,
+        ExportCheckpointV1,
+        ExportSource,
+        ExportTarget,
+    )
     from tributo.exporting.service import BundleExportService
 
     if not isinstance(model, CausalATEModel):
@@ -868,14 +875,40 @@ def export_model(
     source = ExportSource(
         source_kind="prebuilt_onnx",
         model_object=payload,
+        architecture_id=plan.resolution.algorithm,
         feature_schema={"feature_names": list(model.feature_names)},
         metadata={
-            "framework": "distributed_statistics",
+            "framework": "sklearn",
+            "framework_version": sklearn_version,
+            "framework_versions": {"scikit-learn": sklearn_version},
             "task_type": "causal_effect_estimation",
             "causal_study": report,
             "producer_distribution": _PACKAGE,
         },
         source_fingerprint=report_artifact.sha256,
+        checkpoint_contract=ExportCheckpointV1(
+            trainer_type="causal_ate",
+            architecture_id=plan.resolution.algorithm,
+            input_schema=(
+                CheckpointField(
+                    name="float_input",
+                    dtype="float32",
+                    shape=("batch", len(model.feature_names)),
+                ),
+            ),
+            output_schema=(
+                CheckpointField(
+                    name="variable",
+                    dtype="float32",
+                    shape=("batch", 1),
+                ),
+            ),
+            preprocessing={"type": "none"},
+            task_type="causal_effect_estimation",
+            framework="sklearn",
+            framework_version=sklearn_version,
+            checkpoint_format_version=1,
+        ),
     )
     bundle = BundleExportService().export_bundle(
         source,

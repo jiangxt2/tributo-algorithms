@@ -200,20 +200,24 @@ class _DRDriver:
         stage_digests: dict[str, list[str]] = {name: [] for name in STAGES}
         for fold_index, heldout in enumerate(folds):
             training_parts = folds[:fold_index] + folds[fold_index + 1 :]
-            train_data = (
-                training_parts[0]
-                if len(training_parts) == 1
-                else cast(Any, training_parts[0]).union(*training_parts[1:])
+            train_data = cast(
+                Any,
+                (
+                    training_parts[0]
+                    if len(training_parts) == 1
+                    else cast(Any, training_parts[0]).union(*training_parts[1:])
+                ),
             )
+            heldout_data = cast(Any, heldout)
             train_treated = train_data.filter(lambda row: int(row[treatment_name]) == 1)
             train_control = train_data.filter(lambda row: int(row[treatment_name]) == 0)
             train_treated_rows = int(train_treated.count())
             train_control_rows = int(train_control.count())
             heldout_treated_rows = int(
-                heldout.filter(lambda row: int(row[treatment_name]) == 1).count()
+                heldout_data.filter(lambda row: int(row[treatment_name]) == 1).count()
             )
             heldout_control_rows = int(
-                heldout.filter(lambda row: int(row[treatment_name]) == 0).count()
+                heldout_data.filter(lambda row: int(row[treatment_name]) == 0).count()
             )
             if (
                 train_treated_rows < self.plan.runtime.worker_count
@@ -252,7 +256,7 @@ class _DRDriver:
             }
             raw = {name: stages[name].booster_raw for name in STAGES}
             scored_folds.append(
-                heldout.map_batches(
+                heldout_data.map_batches(
                     _score_batch,
                     batch_format="pandas",
                     fn_kwargs={

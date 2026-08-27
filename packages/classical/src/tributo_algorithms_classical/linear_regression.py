@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pickle
 from collections.abc import Iterable, Mapping
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from tributo.algorithms import IterativeOptimizationAlgorithm
@@ -172,7 +172,9 @@ class DistributedLinearRegression(
         estimator.coef_ = np.asarray(state["coef"], dtype=np.float64)
         estimator.intercept_ = float(np.asarray(state["intercept"])[0])
         estimator.n_features_in_ = int(np.asarray(state["feature_count"])[0])
-        feature_names = tuple(str(name) for name in state["feature_names"])
+        feature_names = tuple(
+            str(name) for name in cast(Iterable[object], state["feature_names"])
+        )
         return SklearnModel(estimator, feature_names, "regression")
 
     def state_schema(self) -> Mapping[str, object]:
