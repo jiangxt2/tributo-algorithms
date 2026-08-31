@@ -3076,6 +3076,7 @@ requires-dist = [
     { name = "econml", marker = "extra == 'causal'", specifier = ">=0.15.0" },
     { name = "grpcio", marker = "extra == 'grpc'", specifier = ">=1.60.0" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.25.0" },
+    { name = "kubernetes", marker = "extra == 'kuberay'", specifier = ">=35.0.0,<37.0.0" },
     { name = "lance-ray", marker = "extra == 'data'", specifier = "==0.5.0" },
     { name = "ml-dtypes", marker = "extra == 'model-export'", specifier = ">=0.5.0" },
     { name = "mlflow", marker = "extra == 'registry'", specifier = ">=2.18.0,<3.0.0" },
@@ -3137,7 +3138,7 @@ requires-dist = [
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.12.20250516" },
     { name = "xgboost", marker = "extra == 'test-integration'", specifier = ">=2.1,<4" },
 ]
-provides-extras = ["dev", "data", "data-daft", "hive-ray", "vector-index", "postgresql", "clickhouse", "mysql", "doris-flight", "s3", "model-export", "model-export-torch", "hf", "model-export-hf", "training", "tune", "explainability", "identity", "streaming", "grpc", "registry", "graph", "causal", "streaming-inference", "test-integration"]
+provides-extras = ["dev", "data", "data-daft", "hive-ray", "vector-index", "kuberay", "postgresql", "clickhouse", "mysql", "doris-flight", "s3", "model-export", "model-export-torch", "hf", "model-export-hf", "training", "tune", "explainability", "identity", "streaming", "grpc", "registry", "graph", "causal", "streaming-inference", "test-integration"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -3,17 +3,26 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [master]
+
+env:
+  TRIBUTO_CORE_REF: 86ebc3de5b6856a19b570aea4ff0232c0d82b8db
 
 jobs:
   validate:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workspace/tributo-algorithms
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: workspace/tributo-algorithms
       - uses: actions/checkout@v4
         with:
           repository: jiangxt2/Tributo
           path: Tributo
+          ref: ${{ env.TRIBUTO_CORE_REF }}
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.11.23"
@@ -21,9 +30,22 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: uv sync --all-packages --group dev
+      - run: uv lock --check
+      - run: uv sync --locked --all-packages --group dev
       - run: uv run ruff format --check .
       - run: uv run ruff check .
       - run: uv run mypy packages
       - run: uv run pytest tests
-      - run: uv build --all-packages
+      - run: uv build --all-packages --no-sources
+      - name: Verify a source-free Wheel installation
+        run: |
+          uv build --wheel --no-sources --out-dir "${RUNNER_TEMP}/tributo-core-dist" ../../Tributo
+          uv build --package tributo-algorithms-classical --no-sources --out-dir "${RUNNER_TEMP}/tributo-algorithm-dist"
+          uv venv "${RUNNER_TEMP}/tributo-source-free"
+          uv pip install --python "${RUNNER_TEMP}/tributo-source-free/bin/python" \
+            "${RUNNER_TEMP}"/tributo-core-dist/tributo-*.whl \
+            "${RUNNER_TEMP}"/tributo-algorithm-dist/tributo_algorithms_classical-*.whl
+          "${RUNNER_TEMP}/tributo-source-free/bin/python" \
+            scripts/verify_installed_distribution.py \
+            --distribution tributo-algorithms-classical \
+            --expected-entry-points 13

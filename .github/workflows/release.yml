@@ -9,26 +9,49 @@ permissions:
   contents: read
   id-token: write
 
+env:
+  TRIBUTO_CORE_REF: 86ebc3de5b6856a19b570aea4ff0232c0d82b8db
+
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
     environment: pypi
+    defaults:
+      run:
+        working-directory: workspace/tributo-algorithms
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: workspace/tributo-algorithms
       - uses: actions/checkout@v4
         with:
           repository: jiangxt2/Tributo
           path: Tributo
+          ref: ${{ env.TRIBUTO_CORE_REF }}
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.11.23"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - run: uv lock --check
       - name: Resolve package from tag
+        run: >-
+          python scripts/resolve_release_package.py
+          --tag "${GITHUB_REF_NAME}"
+          --github-env "${GITHUB_ENV}"
+      - name: Build the exact package without local sources
+        run: uv build --no-sources --package "${DISTRIBUTION}"
+      - name: Verify the release Wheel without local sources
         run: |
-          package="${GITHUB_REF_NAME%%-v*}"
-          test -f "packages/${package}/pyproject.toml"
-          echo "PACKAGE=${package}" >> "${GITHUB_ENV}"
-      - run: uv build --package "tributo-algorithms-${PACKAGE}"
+          uv build --wheel --no-sources --out-dir "${RUNNER_TEMP}/tributo-core-dist" ../../Tributo
+          uv venv "${RUNNER_TEMP}/tributo-release-check"
+          uv pip install --python "${RUNNER_TEMP}/tributo-release-check/bin/python" \
+            "${RUNNER_TEMP}"/tributo-core-dist/tributo-*.whl \
+            dist/*.whl
+          "${RUNNER_TEMP}/tributo-release-check/bin/python" \
+            scripts/verify_installed_distribution.py \
+            --distribution "${DISTRIBUTION}"
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: workspace/tributo-algorithms/dist/
