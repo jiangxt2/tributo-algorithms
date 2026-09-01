@@ -69,6 +69,8 @@ PRETRAIN_FINETUNE_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
     environment=EnvironmentSpec(
         environment_id="tributo.official.pretrain-finetune.v1",
         dependencies=(
+            "onnx>=1.16",
+            "onnxruntime>=1.20",
             "safetensors>=0.4.3",
             "torch>=2.5",
             "tributo>=1,<2",
@@ -94,7 +96,7 @@ PRETRAIN_FINETUNE_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
     exporter=(
         "tributo_algorithms_multistage_torch.pretrain:export_pretrain_finetune_result"
     ),
-    flavor_id="safetensors-v1",
+    flavor_id="onnx-runtime-v1",
     contract_bindings=ContractBindingSet(
         config=_binding(
             _SPEC.config_contract_ref or "", "e", "PretrainFinetuneConfigValidator"

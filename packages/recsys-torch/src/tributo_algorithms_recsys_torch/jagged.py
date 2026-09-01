@@ -60,6 +60,61 @@ def _model(
     return JaggedRankingModel()
 
 
+def _padded_inference_model(model: object) -> object:
+    """Adapt EmbeddingBag weights to an explicit padded-history contract."""
+    import torch
+
+    base = cast(torch.nn.Module, model)
+
+    class PaddedJaggedRankingModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.user_embedding = cast(Any, base).user_embedding
+            self.history_embedding = cast(Any, base).history_embedding
+            self.candidate_embedding = cast(Any, base).candidate_embedding
+            self.bias = cast(Any, base).bias
+
+        def forward(
+            self,
+            user_ids: object,
+            item_history: object,
+            candidate_ids: object,
+        ) -> object:
+            users = cast(torch.Tensor, user_ids).long()
+            history = cast(torch.Tensor, item_history).long()
+            candidates = cast(torch.Tensor, candidate_ids).long()
+            user_count = self.user_embedding.num_embeddings
+            item_count = self.candidate_embedding.num_embeddings
+            user_valid = users.ge(0).logical_and(users.lt(user_count))
+            candidate_valid = candidates.ge(0).logical_and(candidates.lt(item_count))
+            history_valid = history.eq(-1).logical_or(
+                history.ge(0).logical_and(history.lt(item_count))
+            )
+            valid = user_valid.logical_and(candidate_valid).logical_and(
+                history_valid.all(dim=1)
+            )
+            safe_users = users.clamp(min=0, max=user_count - 1)
+            safe_candidates = candidates.clamp(min=0, max=item_count - 1)
+            mask = history.ge(0).logical_and(history_valid)
+            safe_history = history.clamp(min=0, max=item_count - 1)
+            embeddings = torch.nn.functional.embedding(
+                safe_history,
+                self.history_embedding.weight,
+            )
+            weights = mask.unsqueeze(-1).to(dtype=embeddings.dtype)
+            counts = weights.sum(dim=1).clamp(min=1.0)
+            history_mean = (embeddings * weights).sum(dim=1) / counts
+            context = self.user_embedding(safe_users) + history_mean
+            candidate = self.candidate_embedding(safe_candidates)
+            score = (context * candidate).sum(dim=1, keepdim=True) + self.bias
+            output = torch.where(valid.unsqueeze(-1), score, torch.zeros_like(score))
+            return torch.cat(
+                (output, valid.unsqueeze(-1).to(dtype=output.dtype)), dim=1
+            )
+
+    return PaddedJaggedRankingModel()
+
+
 def _state_digest(state: Mapping[str, object]) -> str:
     digest = hashlib.sha256()
     for name in sorted(state):
@@ -466,7 +521,13 @@ def export_jagged_result(
     import importlib.metadata
 
     import torch
-    from tributo.exporting.models import BundleOutputConfig, ExportSource, ExportTarget
+    from tributo.exporting.models import (
+        BundleOutputConfig,
+        CheckpointField,
+        ExportCheckpointV1,
+        ExportSource,
+        ExportTarget,
+    )
     from tributo.exporting.service import BundleExportService
 
     if not isinstance(result, JaggedResult):
@@ -491,14 +552,31 @@ def export_jagged_result(
         state = torch.load(root / "model.pt", map_location="cpu", weights_only=True)
         model.load_state_dict(state)
         fingerprint = _state_digest(cast(Mapping[str, object], model.state_dict()))
+        inference_model = cast(torch.nn.Module, _padded_inference_model(model))
+        data_values = cast(Mapping[str, Any], model_config["data"])
+        history_width = int(data_values["inference_history_width"])
         source = ExportSource(
             source_kind="torch_module",
-            model_object=model,
+            model_object=inference_model,
             architecture_id=plan.resolution.implementation_id,
             model_config_data=model_config,
             feature_schema={
-                "feature_names": list(plan.primary_input_binding.feature_names),
-                "jagged_feature": model_config["data"]["history_col"],
+                "input_names": ["user_id", "item_history", "item_id"],
+                "raw_feature_names": list(plan.primary_input_binding.feature_names),
+                "jagged_feature": data_values["history_col"],
+                "user_id_min": 0,
+                "user_id_max_exclusive": int(model_values["user_count"]),
+                "item_id_min": 0,
+                "item_id_max_exclusive": int(model_values["item_count"]),
+                "output_layout": {"score": 0, "valid": 1},
+            },
+            sample_inputs={
+                "user_id": torch.tensor([0, 0], dtype=torch.int64),
+                "item_history": torch.tensor(
+                    [[0, *([-1] * (history_width - 1))]] * 2,
+                    dtype=torch.int64,
+                ),
+                "item_id": torch.tensor([0, 0], dtype=torch.int64),
             },
             metadata={
                 "framework": "pytorch",
@@ -507,6 +585,35 @@ def export_jagged_result(
                 "producer_distribution": "tributo-algorithms-recsys-torch",
             },
             source_fingerprint=fingerprint,
+            checkpoint_contract=ExportCheckpointV1(
+                trainer_type="jagged_embedding_recommender",
+                architecture_id=plan.resolution.implementation_id,
+                input_schema=(
+                    CheckpointField(name="user_id", dtype="int64", shape=("batch",)),
+                    CheckpointField(
+                        name="item_history",
+                        dtype="int64",
+                        shape=("batch", history_width),
+                    ),
+                    CheckpointField(name="item_id", dtype="int64", shape=("batch",)),
+                ),
+                output_schema=(
+                    CheckpointField(
+                        name="output",
+                        dtype="float32",
+                        shape=("batch", 2),
+                    ),
+                ),
+                preprocessing={
+                    "type": "padded_jagged_history",
+                    "padding_value": -1,
+                    "history_width": history_width,
+                    "invalid_id_policy": "zero_output_with_valid_false",
+                },
+                task_type="ranking",
+                framework="pytorch",
+                framework_version=torch.__version__,
+            ),
         )
         bundle = BundleExportService().export_bundle(
             source,
@@ -519,9 +626,18 @@ def export_jagged_result(
                         name="jagged-ranking-model",
                         format="safetensors",
                         exporter_id="torch-safetensors-v1",
-                    )
+                    ),
+                    ExportTarget(
+                        name="jagged-ranking-inference",
+                        format="onnx",
+                        exporter_id="torch-onnx-v1",
+                        options={"dynamo": False},
+                    ),
                 ],
-                roles={"model": "jagged-ranking-model"},
+                roles={
+                    "model": "jagged-ranking-model",
+                    "inference": "jagged-ranking-inference",
+                },
             ),
             tributo_version=importlib.metadata.version("tributo"),
         )

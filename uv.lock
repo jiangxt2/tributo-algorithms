@@ -3222,6 +3222,8 @@ dependencies = [
     { name = "causal-learn" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
+    { name = "onnx" },
+    { name = "onnxruntime" },
     { name = "tributo" },
 ]
 
@@ -3229,6 +3231,8 @@ dependencies = [
 requires-dist = [
     { name = "causal-learn", specifier = ">=0.1.4,<0.2" },
     { name = "numpy", specifier = ">=2,<3" },
+    { name = "onnx", specifier = ">=1.16" },
+    { name = "onnxruntime", specifier = ">=1.20" },
     { name = "tributo", editable = "../../Tributo" },
 ]
 
@@ -3241,6 +3245,8 @@ dependencies = [
     { name = "networkx" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
+    { name = "onnx" },
+    { name = "onnxruntime" },
     { name = "tributo" },
     { name = "tributo-algorithms-causal-core" },
 ]
@@ -3250,6 +3256,8 @@ requires-dist = [
     { name = "dowhy", specifier = ">=0.13,<0.15" },
     { name = "networkx", specifier = ">=3.0" },
     { name = "numpy", specifier = ">=2,<3" },
+    { name = "onnx", specifier = ">=1.16" },
+    { name = "onnxruntime", specifier = ">=1.20" },
     { name = "tributo", editable = "../../Tributo" },
     { name = "tributo-algorithms-causal-core", editable = "packages/causal-core" },
 ]
@@ -3334,6 +3342,8 @@ name = "tributo-algorithms-graph-pyg"
 version = "0.1.0"
 source = { editable = "packages/graph-pyg" }
 dependencies = [
+    { name = "onnx" },
+    { name = "onnxruntime" },
     { name = "safetensors" },
     { name = "torch" },
     { name = "torch-geometric" },
@@ -3342,6 +3352,8 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "onnx", specifier = ">=1.16" },
+    { name = "onnxruntime", specifier = ">=1.20" },
     { name = "safetensors", specifier = ">=0.4.3" },
     { name = "torch", specifier = ">=2.5" },
     { name = "torch-geometric", specifier = ">=2.5" },
@@ -3353,6 +3365,8 @@ name = "tributo-algorithms-multistage-torch"
 version = "0.1.0"
 source = { editable = "packages/multistage-torch" }
 dependencies = [
+    { name = "onnx" },
+    { name = "onnxruntime" },
     { name = "safetensors" },
     { name = "torch" },
     { name = "tributo", extra = ["model-export-torch"] },
@@ -3360,6 +3374,8 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "onnx", specifier = ">=1.16" },
+    { name = "onnxruntime", specifier = ">=1.20" },
     { name = "safetensors", specifier = ">=0.4.3" },
     { name = "torch", specifier = ">=2.5" },
     { name = "tributo", extras = ["model-export-torch"], editable = "../../Tributo" },
@@ -3370,12 +3386,16 @@ name = "tributo-algorithms-recsys-torch"
 version = "0.1.0"
 source = { editable = "packages/recsys-torch" }
 dependencies = [
+    { name = "onnx" },
+    { name = "onnxruntime" },
     { name = "torch" },
     { name = "tributo", extra = ["model-export-torch"] },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "onnx", specifier = ">=1.16" },
+    { name = "onnxruntime", specifier = ">=1.20" },
     { name = "torch", specifier = ">=2.5" },
     { name = "tributo", extras = ["model-export-torch"], editable = "../../Tributo" },
 ]

@@ -86,6 +86,8 @@ def test_lightgbm_export_result_creates_runnable_bundle(
     model_config: dict[str, Any],
     expected_outputs: set[str],
 ) -> None:
+    from tributo.exporting.runtime import BundleModelLoader
+
     features = np.asarray(
         [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]], dtype=np.float32
     )
@@ -152,3 +154,14 @@ def test_lightgbm_export_result_creates_runnable_bundle(
         outputs = session.run(None, {"float_input": features})
         assert {item.name for item in session.get_outputs()} == expected_outputs
         assert len(outputs) == len(expected_outputs)
+    runtime = BundleModelLoader().open(
+        cast(str, execution.outputs["bundle_uri"]),
+        role="inference",
+        use_case="batch",
+    )
+    try:
+        runtime_outputs = runtime.predict({"float_input": features})
+    finally:
+        runtime.close()
+    assert set(runtime_outputs) == expected_outputs
+    assert all(value.shape[0] == len(features) for value in runtime_outputs.values())

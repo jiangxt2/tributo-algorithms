@@ -69,6 +69,8 @@ GCM_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
         dependencies=(
             "dowhy>=0.13,<0.15",
             "networkx>=3.0",
+            "onnx>=1.16",
+            "onnxruntime>=1.20",
             "tributo>=1,<2",
             f"{_PACKAGE}=={_VERSION}",
         ),
@@ -90,7 +92,7 @@ GCM_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
     package_version=_VERSION,
     tributo_version_spec=">=1,<2",
     exporter="tributo_algorithms_causal_dowhy.gcm:export_gcm_result",
-    flavor_id="report",
+    flavor_id="onnx-runtime-v1",
     contract_bindings=ContractBindingSet(
         config=_binding(_SPEC.config_contract_ref or "", "2", "GCMConfigValidator"),
         input=_binding(_SPEC.input_contract_ref or "", "3", "GCMInputValidator"),

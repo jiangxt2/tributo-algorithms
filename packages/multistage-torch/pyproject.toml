@@ -6,6 +6,8 @@ requires-python = ">=3.12,<3.14"
 license = { text = "Apache-2.0" }
 dependencies = [
     "tributo[model-export-torch]>=1,<2",
+    "onnx>=1.16",
+    "onnxruntime>=1.20",
     "torch>=2.5",
     "safetensors>=0.4.3",
 ]

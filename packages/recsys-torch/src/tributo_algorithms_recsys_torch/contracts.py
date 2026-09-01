@@ -94,7 +94,7 @@ class PairCoverageValidator:
 
 class JaggedConfigValidator:
     api_version = 1
-    schema_digest = "f" * 64
+    schema_digest = "9" * 64
 
     def validate(self, value: Mapping[str, Any]) -> Mapping[str, Any]:
         allowed = {"data", "model", "output", "ray", "training"}
@@ -117,6 +117,13 @@ class JaggedConfigValidator:
             raise ValueError("jagged data column names are required")
         if len(set(columns)) != len(columns):
             raise ValueError("jagged data columns must be distinct")
+        history_width = data.get("inference_history_width")
+        if (
+            not isinstance(history_width, int)
+            or isinstance(history_width, bool)
+            or history_width < 1
+        ):
+            raise ValueError("data.inference_history_width must be positive")
         if not value["ray"].get("storage_path"):
             raise ValueError("ray.storage_path is required")
         if not value["output"].get("bundle_uri"):

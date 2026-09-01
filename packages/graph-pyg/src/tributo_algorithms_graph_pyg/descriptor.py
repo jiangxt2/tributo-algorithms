@@ -48,7 +48,7 @@ _SPEC = AlgorithmSpec(
     allowed_execution_modes=(ExecutionMode.FRAMEWORK_NATIVE.value,),
     config_contract_ref="tributo.official.graphsage.config.v1",
     input_contract_ref="tributo.official.graph.homogeneous.v1",
-    output_contract_ref="tributo.official.graphsage.safetensors.v1",
+    output_contract_ref="tributo.official.graphsage.bundle.v1",
 )
 
 _RGCN_SPEC = AlgorithmSpec(
@@ -67,7 +67,7 @@ _RGCN_SPEC = AlgorithmSpec(
     allowed_execution_modes=(ExecutionMode.FRAMEWORK_NATIVE.value,),
     config_contract_ref="tributo.official.rgcn.config.v1",
     input_contract_ref="tributo.official.graph.relational.v1",
-    output_contract_ref="tributo.official.rgcn.safetensors.v1",
+    output_contract_ref="tributo.official.rgcn.bundle.v1",
 )
 
 _CONTRACTS = ContractBindingSet(
@@ -94,6 +94,8 @@ GRAPHSAGE_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
     environment=EnvironmentSpec(
         environment_id="tributo.official.graph-pyg.v1",
         dependencies=(
+            "onnx>=1.16",
+            "onnxruntime>=1.20",
             "safetensors>=0.4.3",
             "torch>=2.5",
             "torch-geometric>=2.5",
@@ -117,7 +119,7 @@ GRAPHSAGE_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
     package_version=_VERSION,
     tributo_version_spec=">=1,<2",
     exporter="tributo_algorithms_graph_pyg.algorithm:export_result",
-    flavor_id="safetensors-v1",
+    flavor_id="onnx-runtime-v1",
     contract_bindings=_CONTRACTS,
     descriptor_api_version=2,
     is_default=True,
@@ -147,7 +149,7 @@ RGCN_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
     package_version=_VERSION,
     tributo_version_spec=">=1,<2",
     exporter="tributo_algorithms_graph_pyg.algorithm:export_result",
-    flavor_id="safetensors-v1",
+    flavor_id="onnx-runtime-v1",
     contract_bindings=ContractBindingSet(
         config=_binding(
             _RGCN_SPEC.config_contract_ref or "", "5", "RelationalGraphConfigValidator"

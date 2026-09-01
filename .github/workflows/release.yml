@@ -10,7 +10,7 @@ permissions:
   id-token: write
 
 env:
-  TRIBUTO_CORE_REF: 86ebc3de5b6856a19b570aea4ff0232c0d82b8db
+  TRIBUTO_CORE_REF: 6ef79841261d88c98bab420193afbe58ca6baa28
 
 jobs:
   build-and-publish:
@@ -51,7 +51,8 @@ jobs:
             dist/*.whl
           "${RUNNER_TEMP}/tributo-release-check/bin/python" \
             scripts/verify_installed_distribution.py \
-            --distribution "${DISTRIBUTION}"
+            --distribution "${DISTRIBUTION}" \
+            --require-scalar-single-column-binding
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: workspace/tributo-algorithms/dist/

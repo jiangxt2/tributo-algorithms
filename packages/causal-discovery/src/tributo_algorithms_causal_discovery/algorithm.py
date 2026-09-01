@@ -6,6 +6,7 @@ import json
 import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from typing import cast
 
 from tributo.algorithms import AlgorithmBuilder
 from tributo.algorithms.api import (
@@ -85,6 +86,114 @@ class CausalGraphModel:
                 "stability-selected shard PC is not bitwise equivalent to centralized PC"
             ],
         }
+
+
+def _query_onnx(model: CausalGraphModel) -> bytes:
+    """Build a bounded ONNX graph for exact causal-edge report queries."""
+    import numpy as np
+    import onnx
+    from onnx import TensorProto, helper, numpy_helper
+
+    endpoints = np.asarray(model.endpoint_matrix, dtype=np.int64)
+    votes = np.asarray(model.adjacency_vote_fraction, dtype=np.float32)
+    node_count = len(model.variables)
+    graph = helper.make_graph(
+        [
+            helper.make_node("GreaterOrEqual", ["edge_index", "min_index"], ["ge"]),
+            helper.make_node("Less", ["edge_index", "max_exclusive"], ["lt"]),
+            helper.make_node("And", ["ge", "lt"], ["element_valid"]),
+            helper.make_node(
+                "Cast",
+                ["element_valid"],
+                ["element_valid_int"],
+                to=TensorProto.INT64,
+            ),
+            helper.make_node(
+                "ReduceMin",
+                ["element_valid_int", "row_axis"],
+                ["valid_int"],
+                keepdims=0,
+            ),
+            helper.make_node("Cast", ["valid_int"], ["valid"], to=TensorProto.BOOL),
+            helper.make_node(
+                "Clip",
+                ["edge_index", "min_index", "max_index"],
+                ["safe_edge_index"],
+            ),
+            helper.make_node(
+                "GatherND",
+                ["endpoint_matrix", "safe_edge_index"],
+                ["raw_left_endpoint"],
+            ),
+            helper.make_node(
+                "Gather",
+                ["safe_edge_index", "reverse_order"],
+                ["reverse_edge_index"],
+                axis=1,
+            ),
+            helper.make_node(
+                "GatherND",
+                ["endpoint_matrix", "reverse_edge_index"],
+                ["raw_right_endpoint"],
+            ),
+            helper.make_node(
+                "GatherND",
+                ["vote_matrix", "safe_edge_index"],
+                ["raw_vote_fraction"],
+            ),
+            helper.make_node(
+                "Where",
+                ["valid", "raw_left_endpoint", "invalid_endpoint"],
+                ["left_endpoint"],
+            ),
+            helper.make_node(
+                "Where",
+                ["valid", "raw_right_endpoint", "invalid_endpoint"],
+                ["right_endpoint"],
+            ),
+            helper.make_node(
+                "Where",
+                ["valid", "raw_vote_fraction", "invalid_vote"],
+                ["vote_fraction"],
+            ),
+        ],
+        "tributo_pc_edge_query",
+        [helper.make_tensor_value_info("edge_index", TensorProto.INT64, [None, 2])],
+        [
+            helper.make_tensor_value_info("left_endpoint", TensorProto.INT64, [None]),
+            helper.make_tensor_value_info("right_endpoint", TensorProto.INT64, [None]),
+            helper.make_tensor_value_info("vote_fraction", TensorProto.FLOAT, [None]),
+            helper.make_tensor_value_info("valid", TensorProto.BOOL, [None]),
+        ],
+        initializer=[
+            numpy_helper.from_array(endpoints, name="endpoint_matrix"),
+            numpy_helper.from_array(votes, name="vote_matrix"),
+            numpy_helper.from_array(np.asarray(0, dtype=np.int64), name="min_index"),
+            numpy_helper.from_array(
+                np.asarray(node_count, dtype=np.int64), name="max_exclusive"
+            ),
+            numpy_helper.from_array(
+                np.asarray(node_count - 1, dtype=np.int64), name="max_index"
+            ),
+            numpy_helper.from_array(
+                np.asarray([1, 0], dtype=np.int64), name="reverse_order"
+            ),
+            numpy_helper.from_array(np.asarray([1], dtype=np.int64), name="row_axis"),
+            numpy_helper.from_array(
+                np.asarray(0, dtype=np.int64), name="invalid_endpoint"
+            ),
+            numpy_helper.from_array(
+                np.asarray(0.0, dtype=np.float32), name="invalid_vote"
+            ),
+        ],
+    )
+    built = helper.make_model(
+        graph,
+        opset_imports=[helper.make_opsetid("", 18)],
+        producer_name="tributo-algorithms-causal-discovery",
+    )
+    onnx.checker.check_model(built)
+    return cast(bytes, built.SerializeToString())
 
 
 class DistributedPCStability(
@@ -248,15 +357,42 @@ def export_graph(
     output = plan.algorithm_config.get("output")
     if not isinstance(output, Mapping) or not isinstance(output.get("bundle_uri"), str):
         raise AlgorithmConfigurationError("PC output.bundle_uri is required")
+    from tributo.exporting.models import CheckpointField, ExportCheckpointV1
+
     source = ExportSource(
-        source_kind="causal_graph",
-        model_object=report,
+        source_kind="prebuilt_onnx",
+        model_object=_query_onnx(model),
+        architecture_id=plan.resolution.implementation_id,
         metadata={
             "causal_study": report,
             "framework": "causal-learn",
+            "framework_versions": {"onnx_opset": "18"},
             "producer_distribution": _PACKAGE,
         },
         source_fingerprint=artifact.sha256,
+        checkpoint_contract=ExportCheckpointV1(
+            trainer_type="pc_stability_discovery",
+            architecture_id=plan.resolution.implementation_id,
+            input_schema=(
+                CheckpointField(name="edge_index", dtype="int64", shape=("batch", 2)),
+            ),
+            output_schema=(
+                CheckpointField(name="left_endpoint", dtype="int64", shape=("batch",)),
+                CheckpointField(name="right_endpoint", dtype="int64", shape=("batch",)),
+                CheckpointField(
+                    name="vote_fraction", dtype="float32", shape=("batch",)
+                ),
+                CheckpointField(name="valid", dtype="bool", shape=("batch",)),
+            ),
+            preprocessing={
+                "type": "variable_index_pair",
+                "variables": list(model.variables),
+                "invalid_index_policy": "zero_output_with_valid_false",
+            },
+            task_type="causal_graph_query",
+            framework="onnx",
+            framework_version="18",
+        ),
     )
     bundle = BundleExportService().export_bundle(
         source,
@@ -266,12 +402,20 @@ def export_graph(
             run_id=run_id,
             targets=[
                 ExportTarget(
+                    name="causal-graph-query",
+                    format="onnx",
+                    exporter_id="prebuilt-onnx-v1",
+                ),
+                ExportTarget(
                     name="causal-graph-report",
                     format="json",
                     exporter_id="official-causal-discovery-report-v1",
-                )
+                ),
             ],
-            roles={"report": "causal-graph-report"},
+            roles={
+                "inference": "causal-graph-query",
+                "report": "causal-graph-report",
+            },
         ),
     )
     return AlgorithmExecutionResult(
@@ -333,6 +477,8 @@ PC_DISCOVERY_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
         dependencies=(
             "causal-learn>=0.1.4,<0.2",
             "numpy>=2,<3",
+            "onnx>=1.16",
+            "onnxruntime>=1.20",
             "tributo>=1,<2",
             f"{_PACKAGE}=={_VERSION}",
         ),
@@ -360,7 +506,7 @@ PC_DISCOVERY_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
     package_version=_VERSION,
     tributo_version_spec=">=1,<2",
     exporter="tributo_algorithms_causal_discovery.algorithm:export_graph",
-    flavor_id="report",
+    flavor_id="onnx-runtime-v1",
     contract_bindings=ContractBindingSet(
         config=_contract(_SPEC.config_contract_ref or "", "6", "PCConfigValidator"),
         input=_contract(_SPEC.input_contract_ref or "", "7", "DiscoveryInputValidator"),

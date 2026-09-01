@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 from tributo.algorithms.api import (
@@ -12,9 +13,16 @@ from tributo.algorithms.api import (
     ResolvedAlgorithmPlan,
 )
 from tributo.algorithms.spi import AlgorithmExecutionContext
+from tributo.exporting.bundle_reader import BundleReader
+from tributo.exporting.runtime import BundleModelLoader
 from tributo_algorithms_causal_discovery import (
     PC_DISCOVERY_DESCRIPTOR,
     DistributedPCStability,
+)
+from tributo_algorithms_causal_discovery.algorithm import (
+    CausalGraphModel,
+    _query_onnx,
+    export_graph,
 )
 from tributo_algorithms_causal_discovery.contracts import (
     DiscoveryCoverageValidator,
@@ -41,6 +49,10 @@ def test_pc_descriptor_uses_map_reduce_stability_selection() -> None:
     distribution = PC_DISCOVERY_DESCRIPTOR.registration.distribution_spec
     assert distribution is not None
     assert distribution.strategy is DistributionStrategy.RAY_MAP_REDUCE
+    assert (
+        PC_DISCOVERY_DESCRIPTOR.registration.implementation.flavor_id
+        == "onnx-runtime-v1"
+    )
 
 
 def test_pc_stability_merges_shard_graph_votes() -> None:
@@ -79,3 +91,70 @@ def test_discovery_coverage_contract_proves_every_shard_row() -> None:
         ],
     }
     assert DiscoveryCoverageValidator().validate(value) == value
+
+
+def test_pc_query_onnx_is_exact_and_marks_invalid_indices() -> None:
+    import onnxruntime as ort
+
+    model = CausalGraphModel(
+        variables=("x0", "x1"),
+        endpoint_matrix=((0, -1), (1, 0)),
+        adjacency_vote_fraction=((0.0, 0.75), (0.75, 0.0)),
+        run_count=4,
+        row_count=64,
+        alpha=0.05,
+        vote_threshold=0.5,
+    )
+    session = ort.InferenceSession(
+        _query_onnx(model),
+        providers=["CPUExecutionProvider"],
+    )
+    left, right, votes, valid = session.run(
+        None,
+        {
+            "edge_index": np.asarray(
+                [[0, 1], [1, 0], [0, 0], [-1, 0], [0, 2]],
+                dtype=np.int64,
+            )
+        },
+    )
+    np.testing.assert_array_equal(left, [-1, 1, 0, 0, 0])
+    np.testing.assert_array_equal(right, [1, -1, 0, 0, 0])
+    np.testing.assert_allclose(votes, [0.75, 0.75, 0.0, 0.0, 0.0])
+    np.testing.assert_array_equal(valid, [True, True, True, False, False])
+
+
+def test_pc_export_publishes_query_and_report_roles(tmp_path: Path) -> None:
+    model = CausalGraphModel(
+        variables=("x0", "x1"),
+        endpoint_matrix=((0, -1), (1, 0)),
+        adjacency_vote_fraction=((0.0, 0.75), (0.75, 0.0)),
+        run_count=4,
+        row_count=64,
+        alpha=0.05,
+        vote_threshold=0.5,
+    )
+    execution = export_graph(
+        model=model,
+        plan=cast(
+            Any,
+            SimpleNamespace(
+                algorithm_config={"output": {"bundle_uri": str(tmp_path / "bundle")}},
+                resolution=SimpleNamespace(
+                    implementation_id=("tributo.official.causal_discovery.pc_stability")
+                ),
+            ),
+        ),
+        run_id="pc-export-test",
+    )
+    bundle_uri = cast(str, execution.outputs["bundle_uri"])
+    manifest = BundleReader().read_manifest(bundle_uri)
+    assert set(manifest.roles) == {"inference", "report"}
+    runtime = BundleModelLoader().open(bundle_uri, role="inference", use_case="batch")
+    try:
+        outputs = runtime.predict(
+            {"edge_index": np.asarray([[0, 1], [-1, 0]], dtype=np.int64)}
+        )
+    finally:
+        runtime.close()
+    np.testing.assert_array_equal(outputs["valid"], [True, False])

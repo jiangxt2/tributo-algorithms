@@ -16,7 +16,13 @@ from tributo.algorithms.api import (
     ResolvedAlgorithmPlan,
 )
 from tributo.algorithms.spi import FrameworkNativeAlgorithm
-from tributo.exporting.models import BundleOutputConfig, ExportSource, ExportTarget
+from tributo.exporting.models import (
+    BundleOutputConfig,
+    CheckpointField,
+    ExportCheckpointV1,
+    ExportSource,
+    ExportTarget,
+)
 from tributo.exporting.service import BundleExportService
 
 STAGES = ("fit_gcm", "attribute_root_cause")
@@ -436,6 +442,81 @@ def create_gcm_algorithm(
     return DistributedGCMRootCause(plan)
 
 
+def _report_query_onnx(report: Mapping[str, object]) -> bytes:
+    """Build a safe exact query over the learned GCM attribution report."""
+    import numpy as np
+    import onnx
+    from onnx import TensorProto, helper, numpy_helper
+
+    nodes = tuple(str(value) for value in cast(Sequence[object], report["nodes"]))
+    attribution = cast(
+        Mapping[str, Mapping[str, float]], report["root_cause_attribution"]
+    )
+    signed = np.asarray(
+        [attribution[node]["mean_signed"] for node in nodes], dtype=np.float32
+    )
+    absolute = np.asarray(
+        [attribution[node]["mean_absolute"] for node in nodes], dtype=np.float32
+    )
+    node_count = len(nodes)
+    graph = helper.make_graph(
+        [
+            helper.make_node("GreaterOrEqual", ["node_id", "min_index"], ["ge"]),
+            helper.make_node("Less", ["node_id", "max_exclusive"], ["lt"]),
+            helper.make_node("And", ["ge", "lt"], ["valid"]),
+            helper.make_node(
+                "Clip",
+                ["node_id", "min_index", "max_index"],
+                ["safe_node_id"],
+            ),
+            helper.make_node(
+                "Gather", ["mean_signed_values", "safe_node_id"], ["raw_signed"]
+            ),
+            helper.make_node(
+                "Gather",
+                ["mean_absolute_values", "safe_node_id"],
+                ["raw_absolute"],
+            ),
+            helper.make_node(
+                "Where", ["valid", "raw_signed", "invalid_value"], ["mean_signed"]
+            ),
+            helper.make_node(
+                "Where",
+                ["valid", "raw_absolute", "invalid_value"],
+                ["mean_absolute"],
+            ),
+        ],
+        "tributo_gcm_attribution_report_query",
+        [helper.make_tensor_value_info("node_id", TensorProto.INT64, [None])],
+        [
+            helper.make_tensor_value_info("mean_signed", TensorProto.FLOAT, [None]),
+            helper.make_tensor_value_info("mean_absolute", TensorProto.FLOAT, [None]),
+            helper.make_tensor_value_info("valid", TensorProto.BOOL, [None]),
+        ],
+        initializer=[
+            numpy_helper.from_array(signed, name="mean_signed_values"),
+            numpy_helper.from_array(absolute, name="mean_absolute_values"),
+            numpy_helper.from_array(np.asarray(0, dtype=np.int64), name="min_index"),
+            numpy_helper.from_array(
+                np.asarray(node_count, dtype=np.int64), name="max_exclusive"
+            ),
+            numpy_helper.from_array(
+                np.asarray(node_count - 1, dtype=np.int64), name="max_index"
+            ),
+            numpy_helper.from_array(
+                np.asarray(0.0, dtype=np.float32), name="invalid_value"
+            ),
+        ],
+    )
+    built = helper.make_model(
+        graph,
+        opset_imports=[helper.make_opsetid("", 18)],
+        producer_name="tributo-algorithms-causal-dowhy",
+    )
+    onnx.checker.check_model(built)
+    return cast(bytes, built.SerializeToString())
+
+
 def export_gcm_result(
     *,
     result: object,
@@ -456,15 +537,42 @@ def export_gcm_result(
         format="application/json",
         payload=payload,
     )
+    nodes = tuple(
+        str(value) for value in cast(Sequence[object], result.report["nodes"])
+    )
     source = ExportSource(
-        source_kind="causal_gcm",
-        model_object=dict(result.report),
+        source_kind="prebuilt_onnx",
+        model_object=_report_query_onnx(result.report),
+        architecture_id=plan.resolution.implementation_id,
         metadata={
             "causal_study": dict(result.report),
             "framework": "dowhy-gcm",
+            "framework_versions": {"onnx_opset": "18"},
             "producer_distribution": _PACKAGE,
         },
         source_fingerprint=artifact.sha256,
+        checkpoint_contract=ExportCheckpointV1(
+            trainer_type="gcm_root_cause_report_query",
+            architecture_id=plan.resolution.implementation_id,
+            input_schema=(
+                CheckpointField(name="node_id", dtype="int64", shape=("batch",)),
+            ),
+            output_schema=(
+                CheckpointField(name="mean_signed", dtype="float32", shape=("batch",)),
+                CheckpointField(
+                    name="mean_absolute", dtype="float32", shape=("batch",)
+                ),
+                CheckpointField(name="valid", dtype="bool", shape=("batch",)),
+            ),
+            preprocessing={
+                "type": "gcm_root_cause_report_query",
+                "nodes": list(nodes),
+                "invalid_index_policy": "zero_output_with_valid_false",
+            },
+            task_type="causal_root_cause_report_query",
+            framework="onnx",
+            framework_version="18",
+        ),
     )
     bundle = BundleExportService().export_bundle(
         source,
@@ -474,12 +582,20 @@ def export_gcm_result(
             run_id=run_id,
             targets=[
                 ExportTarget(
+                    name="gcm-root-cause-query",
+                    format="onnx",
+                    exporter_id="prebuilt-onnx-v1",
+                ),
+                ExportTarget(
                     name="gcm-root-cause-report",
                     format="json",
                     exporter_id="official-causal-gcm-report-v1",
-                )
+                ),
             ],
-            roles={"report": "gcm-root-cause-report"},
+            roles={
+                "inference": "gcm-root-cause-query",
+                "report": "gcm-root-cause-report",
+            },
         ),
     )
     attribution = cast(

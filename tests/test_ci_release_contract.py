@@ -12,10 +12,22 @@ import pytest
 
 _ROOT = Path(__file__).resolve().parents[1]
 _RESOLVER = _ROOT / "scripts" / "resolve_release_package.py"
+_VERIFIER = _ROOT / "scripts" / "verify_installed_distribution.py"
 
 
 def _resolver_module() -> ModuleType:
     spec = importlib.util.spec_from_file_location("release_package_resolver", _RESOLVER)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _verifier_module() -> ModuleType:
+    spec = importlib.util.spec_from_file_location(
+        "installed_distribution_verifier", _VERIFIER
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -93,7 +105,15 @@ def test_workflows_use_the_portable_nested_checkout_layout() -> None:
         assert "uv lock --check" in workflow
         assert "--no-sources" in workflow
         assert "verify_installed_distribution.py" in workflow
+        assert "--require-scalar-single-column-binding" in workflow
+        assert "6ef79841261d88c98bab420193afbe58ca6baa28" in workflow
     assert "branches: [master]" in ci
     assert "branches: [main]" not in ci
     assert "resolve_release_package.py" in release
     assert "packages-dir: workspace/tributo-algorithms/dist/" in release
+
+
+def test_source_free_verifier_exercises_scalar_binding_contract() -> None:
+    verifier = _verifier_module()
+
+    verifier._verify_scalar_single_column_binding()

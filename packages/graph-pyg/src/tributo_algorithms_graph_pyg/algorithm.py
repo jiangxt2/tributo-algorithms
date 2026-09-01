@@ -7,7 +7,10 @@ import json
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from ray.train import ScalingConfig
 
 from tributo.algorithms.api import (
     AlgorithmConfigurationError,
@@ -85,6 +88,55 @@ def _build_model(
     return GraphSAGE()
 
 
+def _node_lookup_model(model: object, logits: object) -> object:
+    """Preserve trained weights and expose bounded transductive lookup."""
+    import torch
+
+    trained = cast(torch.nn.Module, model)
+
+    class NodeLookupModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.conv1 = cast(Any, trained).conv1
+            self.conv2 = cast(Any, trained).conv2
+            self.register_buffer(
+                "inference_logits",
+                cast(torch.Tensor, logits).detach().to(dtype=torch.float32),
+                persistent=False,
+            )
+
+        def forward(self, node_id: object) -> object:
+            values = cast(torch.Tensor, node_id).long()
+            stored = cast(torch.Tensor, self.inference_logits)
+            valid = values.ge(0).logical_and(values.lt(stored.shape[0]))
+            safe_values = values.clamp(min=0, max=stored.shape[0] - 1)
+            selected = stored[safe_values]
+            logits = torch.where(
+                valid.unsqueeze(-1), selected, torch.zeros_like(selected)
+            )
+            return torch.cat(
+                (logits, valid.unsqueeze(-1).to(dtype=logits.dtype)), dim=1
+            )
+
+    return NodeLookupModel()
+
+
+def _scaling_config(plan: ResolvedAlgorithmPlan) -> "ScalingConfig":
+    """Build the public Ray Train resource and placement contract."""
+    from ray.train import ScalingConfig
+
+    return ScalingConfig(
+        num_workers=plan.runtime.worker_count,
+        use_gpu=plan.runtime.num_gpus > 0,
+        resources_per_worker={
+            "CPU": plan.runtime.num_cpus,
+            "GPU": plan.runtime.num_gpus,
+            **dict(plan.runtime.custom_resources),
+        },
+        placement_strategy="SPREAD",
+    )
+
+
 def _columns(iterator: object, names: tuple[str, ...]) -> dict[str, list[object]]:
     iter_batches = getattr(iterator, "iter_batches", None)
     if not callable(iter_batches):
@@ -115,6 +167,62 @@ def _state_digest(state: Mapping[str, object]) -> str:
         digest.update(str(tuple(tensor.shape)).encode("ascii"))
         digest.update(tensor.numpy().tobytes())
     return digest.hexdigest()
+
+
+def _tensor_digest(value: object) -> str:
+    """Return a stable digest for one derived tensor without persisting its rows."""
+    tensor = cast(Any, value).detach().cpu().contiguous()
+    digest = hashlib.sha256()
+    digest.update(str(tensor.dtype).encode("ascii"))
+    digest.update(str(tuple(tensor.shape)).encode("ascii"))
+    digest.update(tensor.numpy().tobytes())
+    return digest.hexdigest()
+
+
+def _graph_identity_digest(
+    *,
+    topology_digest: str,
+    node_feature_digest: str,
+    node_feature_names: tuple[str, ...],
+) -> str:
+    """Bind transductive node IDs to topology and feature values."""
+    payload = {
+        "schema_version": 1,
+        "topology_digest": topology_digest,
+        "node_feature_digest": node_feature_digest,
+        "node_feature_names": list(node_feature_names),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _graph_source_fingerprint(
+    *,
+    model_digest: str,
+    graph_identity_digest: str,
+    inference_logits_digest: str,
+) -> str:
+    """Identify every state component embedded in the exported lookup model."""
+    payload = {
+        "schema_version": 1,
+        "model_digest": model_digest,
+        "graph_identity_digest": graph_identity_digest,
+        "inference_logits_digest": inference_logits_digest,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _require_sha256(value: object, *, name: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise AlgorithmExecutionError(f"graph checkpoint {name} is invalid")
+    return value
 
 
 def _graph_train_loop(config: dict[str, Any]) -> None:
@@ -241,6 +349,17 @@ def _graph_train_loop(config: dict[str, Any]) -> None:
         torch.nn.Module,
         model.module if hasattr(model, "module") else model,
     )
+    unwrapped.eval()
+    with torch.no_grad():
+        inference_logits = (
+            (
+                unwrapped(x, edge_index, edge_type)
+                if edge_type is not None
+                else unwrapped(x, edge_index)
+            )
+            .detach()
+            .cpu()
+        )
     state = cast(Mapping[str, object], unwrapped.state_dict())
     model_digest = _state_digest(state)
     topology_digest = hashlib.sha256(
@@ -255,6 +374,13 @@ def _graph_train_loop(config: dict[str, Any]) -> None:
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+    node_feature_digest = _tensor_digest(x)
+    graph_identity_digest = _graph_identity_digest(
+        topology_digest=topology_digest,
+        node_feature_digest=node_feature_digest,
+        node_feature_names=tuple(str(value) for value in names["node_features"]),
+    )
+    inference_logits_digest = _tensor_digest(inference_logits)
 
     context = train.get_context()
     rank = context.get_world_rank()
@@ -279,6 +405,9 @@ def _graph_train_loop(config: dict[str, Any]) -> None:
         "collective_steps": epochs,
         "model_state_digest": model_digest,
         "topology_digest": topology_digest,
+        "node_feature_digest": node_feature_digest,
+        "graph_identity_digest": graph_identity_digest,
+        "inference_logits_digest": inference_logits_digest,
         "topology_kind": "relational" if relations else "homogeneous",
         "resources": {
             "num_cpus": float(assigned.get("CPU", 0.0)),
@@ -297,6 +426,7 @@ def _graph_train_loop(config: dict[str, Any]) -> None:
         with tempfile.TemporaryDirectory(prefix="tributo-graphsage-") as directory:
             root = Path(directory)
             torch.save(dict(state), root / "model.pt")
+            torch.save(inference_logits, root / "inference_logits.pt")
             (root / "model_config.json").write_text(
                 json.dumps(
                     {
@@ -306,6 +436,11 @@ def _graph_train_loop(config: dict[str, Any]) -> None:
                         "node_features": list(names["node_features"]),
                         "model_kind": model_kind,
                         "num_relations": int(model_config.get("num_relations", 1)),
+                        "graph_identity_version": 1,
+                        "topology_digest": topology_digest,
+                        "node_feature_digest": node_feature_digest,
+                        "graph_identity_digest": graph_identity_digest,
+                        "inference_logits_digest": inference_logits_digest,
                     },
                     sort_keys=True,
                 ),
@@ -363,7 +498,7 @@ class DistributedGraphSAGE(FrameworkNativeAlgorithm):
         datasets: Mapping[str, object],
     ) -> object:
         import ray
-        from ray.train import DataConfig, RunConfig, ScalingConfig
+        from ray.train import DataConfig, RunConfig
         from ray.train.torch import TorchTrainer
 
         model_config = dict(cast(Mapping[str, Any], config.get("model", {})))
@@ -421,15 +556,7 @@ class DistributedGraphSAGE(FrameworkNativeAlgorithm):
                 "model": model_config,
                 "training": training_config,
             },
-            scaling_config=ScalingConfig(
-                num_workers=self.plan.runtime.worker_count,
-                use_gpu=self.plan.runtime.num_gpus > 0,
-                resources_per_worker={
-                    "CPU": self.plan.runtime.num_cpus,
-                    "GPU": self.plan.runtime.num_gpus,
-                    **dict(self.plan.runtime.custom_resources),
-                },
-            ),
+            scaling_config=_scaling_config(self.plan),
             datasets=cast(dict[str, Any], dict(datasets)),
             dataset_config=DataConfig(datasets_to_split=["train"]),
             run_config=RunConfig(
@@ -451,10 +578,22 @@ class DistributedGraphSAGE(FrameworkNativeAlgorithm):
             raise AlgorithmExecutionError("graph training did not report every worker")
         model_digests = {str(item.get("model_state_digest")) for item in workers}
         topology_digests = {str(item.get("topology_digest")) for item in workers}
+        node_feature_digests = {
+            str(item.get("node_feature_digest")) for item in workers
+        }
+        graph_identity_digests = {
+            str(item.get("graph_identity_digest")) for item in workers
+        }
+        inference_logits_digests = {
+            str(item.get("inference_logits_digest")) for item in workers
+        }
         topology_kinds = {str(item.get("topology_kind")) for item in workers}
         if (
             len(model_digests) != 1
             or len(topology_digests) != 1
+            or len(node_feature_digests) != 1
+            or len(graph_identity_digests) != 1
+            or len(inference_logits_digests) != 1
             or len(topology_kinds) != 1
         ):
             raise AlgorithmExecutionError(
@@ -472,6 +611,9 @@ class DistributedGraphSAGE(FrameworkNativeAlgorithm):
                     "sampling": "full_neighborhood",
                     "topology_kind": next(iter(topology_kinds)),
                     "topology_digest": next(iter(topology_digests)),
+                    "node_feature_digest": next(iter(node_feature_digests)),
+                    "graph_identity_digest": next(iter(graph_identity_digests)),
+                    "inference_logits_digest": next(iter(inference_logits_digests)),
                 },
             },
             "input_complete": True,
@@ -518,7 +660,13 @@ def export_result(
 
     import torch
     import torch_geometric
-    from tributo.exporting.models import BundleOutputConfig, ExportSource, ExportTarget
+    from tributo.exporting.models import (
+        BundleOutputConfig,
+        CheckpointField,
+        ExportCheckpointV1,
+        ExportSource,
+        ExportTarget,
+    )
     from tributo.exporting.service import BundleExportService
 
     output = plan.algorithm_config.get("output")
@@ -544,16 +692,89 @@ def export_result(
         )
         state = torch.load(root / "model.pt", map_location="cpu", weights_only=True)
         model.load_state_dict(state)
-        fingerprint = _state_digest(cast(Mapping[str, object], model.state_dict()))
+        model.eval()
+        inference_logits = torch.load(
+            root / "inference_logits.pt",
+            map_location="cpu",
+            weights_only=True,
+        )
+        if not isinstance(inference_logits, torch.Tensor) or inference_logits.ndim != 2:
+            raise AlgorithmExecutionError("graph inference logits are malformed")
+        if inference_logits.shape[0] < 1:
+            raise AlgorithmExecutionError("graph inference logits must not be empty")
+        num_classes = int(model_config["num_classes"])
+        if inference_logits.shape[1] != num_classes or not bool(
+            torch.isfinite(inference_logits).all()
+        ):
+            raise AlgorithmExecutionError(
+                "graph inference logits do not match the finite class contract"
+            )
+        graph_identity_version = model_config.get("graph_identity_version")
+        if (
+            not isinstance(graph_identity_version, int)
+            or isinstance(graph_identity_version, bool)
+            or graph_identity_version != 1
+        ):
+            raise AlgorithmExecutionError("graph identity version is unsupported")
+        topology_digest = _require_sha256(
+            model_config.get("topology_digest"), name="topology_digest"
+        )
+        node_feature_digest = _require_sha256(
+            model_config.get("node_feature_digest"), name="node_feature_digest"
+        )
+        graph_identity_digest = _require_sha256(
+            model_config.get("graph_identity_digest"), name="graph_identity_digest"
+        )
+        node_feature_names = model_config.get("node_features")
+        if not isinstance(node_feature_names, list) or not all(
+            isinstance(value, str) and value for value in node_feature_names
+        ):
+            raise AlgorithmExecutionError("graph checkpoint node features are invalid")
+        computed_graph_identity = _graph_identity_digest(
+            topology_digest=topology_digest,
+            node_feature_digest=node_feature_digest,
+            node_feature_names=tuple(node_feature_names),
+        )
+        if graph_identity_digest != computed_graph_identity:
+            raise AlgorithmExecutionError("graph identity digest mismatched")
+        expected_logits_digest = _require_sha256(
+            model_config.get("inference_logits_digest"),
+            name="inference_logits_digest",
+        )
+        actual_logits_digest = _tensor_digest(inference_logits)
+        if expected_logits_digest != actual_logits_digest:
+            raise AlgorithmExecutionError("graph inference logits digest mismatched")
+        bundle_model = cast(
+            torch.nn.Module,
+            _node_lookup_model(model, inference_logits),
+        )
+        model_digest = _state_digest(cast(Mapping[str, object], model.state_dict()))
+        fingerprint = _graph_source_fingerprint(
+            model_digest=model_digest,
+            graph_identity_digest=graph_identity_digest,
+            inference_logits_digest=actual_logits_digest,
+        )
         source = ExportSource(
             source_kind="torch_module",
-            model_object=model,
+            model_object=bundle_model,
             architecture_id=plan.resolution.implementation_id,
             model_config_data=model_config,
             feature_schema={
-                "node_features": model_config["node_features"],
-                "graph_inputs": ["node_features", "edge_index", "seed_nodes"],
+                "input_names": ["node_id"],
+                "node_features": node_feature_names,
+                "node_id_min": 0,
+                "node_id_max_exclusive": int(inference_logits.shape[0]),
+                "graph_identity_version": 1,
+                "topology_digest": topology_digest,
+                "node_feature_digest": node_feature_digest,
+                "graph_identity_digest": graph_identity_digest,
+                "inference_logits_digest": actual_logits_digest,
+                "output_layout": {
+                    "logits": [0, int(model_config["num_classes"])],
+                    "valid": int(model_config["num_classes"]),
+                },
             },
+            sample_inputs={"node_id": torch.tensor([0, 1], dtype=torch.int64)},
             metadata={
                 "framework": "pytorch-geometric",
                 "framework_versions": {
@@ -562,6 +783,7 @@ def export_result(
                 },
                 "task_type": "node_classification",
                 "sampling": "full_neighborhood",
+                "graph_identity_digest": graph_identity_digest,
                 "topology_kind": (
                     "relational"
                     if model_config.get("model_kind") == "rgcn"
@@ -570,6 +792,37 @@ def export_result(
                 "producer_distribution": "tributo-algorithms-graph-pyg",
             },
             source_fingerprint=fingerprint,
+            checkpoint_contract=ExportCheckpointV1(
+                trainer_type=str(model_config.get("model_kind", "graphsage")),
+                architecture_id=plan.resolution.implementation_id,
+                input_schema=(
+                    CheckpointField(
+                        name="node_id",
+                        dtype="int64",
+                        shape=("batch",),
+                    ),
+                ),
+                output_schema=(
+                    CheckpointField(
+                        name="output",
+                        dtype="float32",
+                        shape=("batch", int(model_config["num_classes"]) + 1),
+                    ),
+                ),
+                preprocessing={
+                    "type": "transductive_node_lookup",
+                    "invalid_id_policy": "zero_output_with_valid_false",
+                    "node_count": int(inference_logits.shape[0]),
+                    "graph_identity_version": 1,
+                    "topology_digest": topology_digest,
+                    "node_feature_digest": node_feature_digest,
+                    "graph_identity_digest": graph_identity_digest,
+                    "inference_logits_digest": actual_logits_digest,
+                },
+                task_type="transductive_node_classification",
+                framework="pytorch-geometric",
+                framework_version=torch_geometric.__version__,
+            ),
         )
         published = BundleExportService().export_bundle(
             source,
@@ -582,9 +835,18 @@ def export_result(
                         name="graph-model",
                         format="safetensors",
                         exporter_id="torch-safetensors-v1",
-                    )
+                    ),
+                    ExportTarget(
+                        name="graph-inference",
+                        format="onnx",
+                        exporter_id="torch-onnx-v1",
+                        options={"dynamo": False},
+                    ),
                 ],
-                roles={"model": "graph-model"},
+                roles={
+                    "model": "graph-model",
+                    "inference": "graph-inference",
+                },
             ),
             tributo_version=importlib.metadata.version("tributo"),
         )

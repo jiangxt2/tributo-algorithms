@@ -8,7 +8,10 @@ import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from ray.train import ScalingConfig
 
 from tributo.algorithms.api import (
     AlgorithmConfigurationError,
@@ -205,6 +208,22 @@ class DistillationResult:
     composition_digest: str
 
 
+def _distillation_scaling_config(plan: ResolvedAlgorithmPlan) -> "ScalingConfig":
+    """Build the public Ray Train resource and placement contract."""
+    from ray.train import ScalingConfig
+
+    return ScalingConfig(
+        num_workers=plan.runtime.worker_count,
+        use_gpu=plan.runtime.num_gpus > 0,
+        resources_per_worker={
+            "CPU": plan.runtime.num_cpus,
+            "GPU": plan.runtime.num_gpus,
+            **dict(plan.runtime.custom_resources),
+        },
+        placement_strategy="SPREAD",
+    )
+
+
 class _DistillationDriver:
     def __init__(
         self,
@@ -216,7 +235,7 @@ class _DistillationDriver:
         self.datasets = dict(datasets)
 
     def _trainer(self, stage: str, *, resume: object | None = None) -> object:
-        from ray.train import DataConfig, RunConfig, ScalingConfig
+        from ray.train import DataConfig, RunConfig
         from ray.train.torch import TorchTrainer
 
         config = self.plan.algorithm_config
@@ -244,15 +263,7 @@ class _DistillationDriver:
                     else {}
                 ),
             },
-            scaling_config=ScalingConfig(
-                num_workers=self.plan.runtime.worker_count,
-                use_gpu=self.plan.runtime.num_gpus > 0,
-                resources_per_worker={
-                    "CPU": self.plan.runtime.num_cpus,
-                    "GPU": self.plan.runtime.num_gpus,
-                    **dict(self.plan.runtime.custom_resources),
-                },
-            ),
+            scaling_config=_distillation_scaling_config(self.plan),
             datasets=cast(dict[str, Any], self.datasets),
             dataset_config=DataConfig(datasets_to_split=["train"]),
             run_config=RunConfig(
@@ -378,7 +389,13 @@ def export_result(
     import importlib.metadata
 
     import torch
-    from tributo.exporting.models import BundleOutputConfig, ExportSource, ExportTarget
+    from tributo.exporting.models import (
+        BundleOutputConfig,
+        CheckpointField,
+        ExportCheckpointV1,
+        ExportSource,
+        ExportTarget,
+    )
     from tributo.exporting.service import BundleExportService
 
     if not isinstance(result, DistillationResult):
@@ -401,12 +418,16 @@ def export_result(
         state = torch.load(root / "model.pt", map_location="cpu", weights_only=True)
         model.load_state_dict(state)
         fingerprint = _state_digest(cast(Mapping[str, object], model.state_dict()))
+        input_features = int(model_config["input_features"])
         source = ExportSource(
             source_kind="torch_module",
             model_object=model,
             architecture_id=plan.resolution.implementation_id,
             model_config_data=model_config,
-            feature_schema={"feature_names": model_config["feature_names"]},
+            feature_schema={"input_names": ["float_input"]},
+            sample_inputs={
+                "float_input": torch.zeros((2, input_features), dtype=torch.float32)
+            },
             metadata={
                 "framework": "pytorch",
                 "task_type": "binary_classification",
@@ -415,6 +436,28 @@ def export_result(
                 "producer_distribution": "tributo-algorithms-multistage-torch",
             },
             source_fingerprint=fingerprint,
+            checkpoint_contract=ExportCheckpointV1(
+                trainer_type="teacher_student_distillation",
+                architecture_id=plan.resolution.implementation_id,
+                input_schema=(
+                    CheckpointField(
+                        name="float_input",
+                        dtype="float32",
+                        shape=("batch", input_features),
+                    ),
+                ),
+                output_schema=(
+                    CheckpointField(
+                        name="output",
+                        dtype="float32",
+                        shape=("batch", 1),
+                    ),
+                ),
+                preprocessing={"type": "ordered_features"},
+                task_type="binary_classification",
+                framework="pytorch",
+                framework_version=torch.__version__,
+            ),
         )
         bundle = BundleExportService().export_bundle(
             source,
@@ -427,9 +470,18 @@ def export_result(
                         name="student-model",
                         format="safetensors",
                         exporter_id="torch-safetensors-v1",
-                    )
+                    ),
+                    ExportTarget(
+                        name="student-inference",
+                        format="onnx",
+                        exporter_id="torch-onnx-v1",
+                        options={"dynamo": False},
+                    ),
                 ],
-                roles={"model": "student-model"},
+                roles={
+                    "model": "student-model",
+                    "inference": "student-inference",
+                },
             ),
             tributo_version=importlib.metadata.version("tributo"),
         )

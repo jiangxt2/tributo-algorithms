@@ -20,7 +20,7 @@ class CausalDiscoveryReportExporter(CausalReportExporter):
     output_flavor_id: ClassVar[str] = "report"
     artifact_kind: ClassVar[str] = "report"
     priority: ClassVar[int] = 90
-    source_kinds: ClassVar[tuple[str, ...]] = ("causal_graph",)
+    source_kinds: ClassVar[tuple[str, ...]] = ("causal_graph", "prebuilt_onnx")
     options_model: ClassVar[type[BaseModel]] = DiscoveryReportOptions
     validator_bindings: ClassVar[tuple[ValidatorBinding, ...]] = ()
     mutates_source: ClassVar[bool] = False
@@ -28,7 +28,7 @@ class CausalDiscoveryReportExporter(CausalReportExporter):
 
     @classmethod
     def supports(cls, request: SupportRequest) -> SupportResult:
-        supported = request.source_kind == "causal_graph"
+        supported = request.source_kind in cls.source_kinds
         return SupportResult(
             supported=supported,
             code="OK" if supported else "UNSUPPORTED_SOURCE_KIND",

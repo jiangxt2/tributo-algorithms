@@ -74,6 +74,8 @@ PC_DISCOVERY_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
         dependencies=(
             "causal-learn>=0.1.4,<0.2",
             "numpy>=2,<3",
+            "onnx>=1.16",
+            "onnxruntime>=1.20",
             "tributo>=1,<2",
             f"{_PACKAGE}=={_VERSION}",
         ),
@@ -101,7 +103,7 @@ PC_DISCOVERY_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
     package_version=_VERSION,
     tributo_version_spec=">=1,<2",
     exporter="tributo_algorithms_causal_discovery.algorithm:export_graph",
-    flavor_id="report",
+    flavor_id="onnx-runtime-v1",
     contract_bindings=ContractBindingSet(
         config=_contract(_SPEC.config_contract_ref or "", "6", "PCConfigValidator"),
         input=_contract(

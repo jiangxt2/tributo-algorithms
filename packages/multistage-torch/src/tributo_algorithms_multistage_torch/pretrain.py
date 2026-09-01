@@ -407,7 +407,13 @@ def export_pretrain_finetune_result(
     import importlib.metadata
 
     import torch
-    from tributo.exporting.models import BundleOutputConfig, ExportSource, ExportTarget
+    from tributo.exporting.models import (
+        BundleOutputConfig,
+        CheckpointField,
+        ExportCheckpointV1,
+        ExportSource,
+        ExportTarget,
+    )
     from tributo.exporting.service import BundleExportService
 
     if not isinstance(result, PretrainFinetuneResult):
@@ -432,12 +438,16 @@ def export_pretrain_finetune_result(
         state = torch.load(root / "model.pt", map_location="cpu", weights_only=True)
         model.load_state_dict(state)
         fingerprint = _state_digest(cast(Mapping[str, object], model.state_dict()))
+        input_features = int(model_config["input_features"])
         source = ExportSource(
             source_kind="torch_module",
             model_object=model,
             architecture_id=plan.resolution.implementation_id,
             model_config_data=model_config,
-            feature_schema={"feature_names": model_config["feature_names"]},
+            feature_schema={"input_names": ["float_input"]},
+            sample_inputs={
+                "float_input": torch.zeros((2, input_features), dtype=torch.float32)
+            },
             metadata={
                 "framework": "pytorch",
                 "task_type": "binary_classification",
@@ -446,6 +456,28 @@ def export_pretrain_finetune_result(
                 "producer_distribution": "tributo-algorithms-multistage-torch",
             },
             source_fingerprint=fingerprint,
+            checkpoint_contract=ExportCheckpointV1(
+                trainer_type="pretrain_finetune_classifier",
+                architecture_id=plan.resolution.implementation_id,
+                input_schema=(
+                    CheckpointField(
+                        name="float_input",
+                        dtype="float32",
+                        shape=("batch", input_features),
+                    ),
+                ),
+                output_schema=(
+                    CheckpointField(
+                        name="output",
+                        dtype="float32",
+                        shape=("batch", 1),
+                    ),
+                ),
+                preprocessing={"type": "ordered_features"},
+                task_type="binary_classification",
+                framework="pytorch",
+                framework_version=torch.__version__,
+            ),
         )
         bundle = BundleExportService().export_bundle(
             source,
@@ -458,9 +490,18 @@ def export_pretrain_finetune_result(
                         name="finetuned-model",
                         format="safetensors",
                         exporter_id="torch-safetensors-v1",
-                    )
+                    ),
+                    ExportTarget(
+                        name="finetuned-inference",
+                        format="onnx",
+                        exporter_id="torch-onnx-v1",
+                        options={"dynamo": False},
+                    ),
                 ],
-                roles={"model": "finetuned-model"},
+                roles={
+                    "model": "finetuned-model",
+                    "inference": "finetuned-inference",
+                },
             ),
             tributo_version=importlib.metadata.version("tributo"),
         )

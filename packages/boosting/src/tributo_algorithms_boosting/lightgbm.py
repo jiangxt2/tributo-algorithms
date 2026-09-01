@@ -430,6 +430,15 @@ def export_result(
                 zipmap=False,
                 target_opset=15,
             )
+            for graph_output in converted.graph.output:
+                dimensions = graph_output.type.tensor_type.shape.dim
+                if not dimensions:
+                    raise AlgorithmExecutionError(
+                        "LightGBM ONNX output omitted its batch dimension"
+                    )
+                batch_dimension = dimensions[0]
+                batch_dimension.ClearField("dim_value")
+                batch_dimension.dim_param = "batch"
             converted.graph.name = "tributo-lightgbm"
             converted.doc_string = ""
             for node in converted.graph.node:
