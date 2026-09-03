@@ -1,117 +1,166 @@
-"""Tabular Autoencoder TrainingRecipeV2 implementation."""
+"""Typed TorchRecipe implementation for the tabular autoencoder."""
 
 from __future__ import annotations
 
-import pickle
 from collections.abc import Mapping
 from typing import Any, cast
 
-from tributo.algorithms import (
-    MetricPlan,
-    OptimizationPlan,
-    TrainingRecipeV2,
-    TrainingStepResult,
+from tributo.algorithms.api.torch_runtime import (
+    TorchLossContribution,
+    TorchMetricContribution,
+)
+from tributo.algorithms.spi import (
+    TorchArtifactContext,
+    TorchArtifactPlan,
+    TorchBatch,
+    TorchBatchContext,
+    TorchBuildContext,
+    TorchMetricPlan,
+    TorchModuleSet,
+    TorchOptimizationPlan,
+    TorchRecipe,
+    TorchRuntimeContext,
+    TorchStepContext,
+    TorchStepResult,
 )
 
 
-def _mse(predictions: object, targets: object) -> object:
+def _batch(batch: object, context: TorchBatchContext) -> TorchBatch:
     import torch
 
-    return torch.mean((cast(Any, predictions) - cast(Any, targets)) ** 2)
+    if not isinstance(batch, Mapping):
+        raise ValueError("Autoencoder batch must be columnar")
+    feature_names = context.feature_names or tuple(batch)
+    if not feature_names:
+        raise ValueError("Autoencoder requires dense feature columns")
+    if context.label_name is not None or context.weight_name is not None:
+        raise ValueError("Autoencoder does not accept label or sample-weight bindings")
+    features = torch.stack(
+        [torch.as_tensor(batch[name], dtype=torch.float32) for name in feature_names],
+        dim=1,
+    )
+    if not torch.isfinite(features).all():
+        raise ValueError("Autoencoder features must be finite")
+    rows = int(features.shape[0])
+    return TorchBatch(
+        keyword={"features": features},
+        targets=features,
+        local_rows=rows,
+        coverage_counts={"train": rows},
+    )
 
 
-class _CheckpointCodec:
-    def dumps(self, value: object) -> bytes:
-        return pickle.dumps(value, protocol=5)
+def _model(config: Mapping[str, Any]) -> object:
+    import torch
 
-    def loads(self, payload: bytes) -> object:
-        return pickle.loads(payload)
+    input_features = int(config.get("input_features", 4))
+    latent_features = int(config.get("latent_features", 2))
+    if input_features < 1 or latent_features < 1:
+        raise ValueError("Autoencoder dimensions must be positive")
+    return torch.nn.Sequential(
+        torch.nn.Linear(input_features, latent_features),
+        torch.nn.ReLU(),
+        torch.nn.Linear(latent_features, input_features),
+    )
 
 
-class TabularAutoencoderRecipe(TrainingRecipeV2):
-    """Reconstruct dense inputs without requiring a label column."""
+class TabularAutoencoderRecipe(TorchRecipe):
+    """Reconstruct dense inputs with element-normalized squared error."""
 
-    def build_modules(self, config: Mapping[str, Any]) -> Mapping[str, object]:
+    def build_modules(self, context: TorchBuildContext) -> TorchModuleSet:
         import torch
 
-        model = config.get("model", {})
-        if not isinstance(model, Mapping):
-            raise ValueError("model config must be a mapping")
-        input_features = int(model.get("input_features", 4))
-        latent_features = int(model.get("latent_features", 2))
-        module = torch.nn.Sequential(
-            torch.nn.Linear(input_features, latent_features),
-            torch.nn.ReLU(),
-            torch.nn.Linear(latent_features, input_features),
+        model_config = context.runtime.algorithm_config.get("model", {})
+        if not isinstance(model_config, Mapping):
+            raise ValueError("Autoencoder model config must be a mapping")
+        return TorchModuleSet(
+            {"model": _model(model_config), "loss": torch.nn.Identity()}
         )
-        return {"model": module, "loss": torch.nn.MSELoss()}
 
-    def batch_adapter(
-        self,
-        batch: object,
-        *,
-        feature_names: tuple[str, ...],
-        label_name: str | None,
-        weight_name: str | None,
-        config: Mapping[str, Any],
-    ) -> tuple[object, object, object | None, int]:
-        import torch
-
-        del label_name, config
-        if not isinstance(batch, Mapping):
-            raise ValueError("Autoencoder batch must be columnar")
-        features = torch.stack(
-            [batch[name].to(dtype=torch.float32) for name in feature_names], dim=1
-        )
-        weights = batch.get(weight_name) if weight_name is not None else None
-        return features, features, weights, int(features.shape[0])
+    def adapt_batch(self, batch: object, context: TorchBatchContext) -> TorchBatch:
+        return _batch(batch, context)
 
     def training_step(
-        self,
-        modules: Mapping[str, object],
-        features: object,
-        targets: object,
-        weights: object | None,
-        config: Mapping[str, Any],
-    ) -> TrainingStepResult:
-        del weights, config
-        model = cast(Any, modules["model"])
-        loss = cast(Any, modules["loss"])
-        reconstruction = model(features)
-        return TrainingStepResult(reconstruction, loss(reconstruction, targets))
-
-    def validation_step(
-        self,
-        modules: Mapping[str, object],
-        features: object,
-        targets: object,
-        weights: object | None,
-        config: Mapping[str, Any],
-    ) -> TrainingStepResult:
-        return self.training_step(modules, features, targets, weights, config)
-
-    def optimization_plan(
-        self,
-        model: object,
-        config: Mapping[str, Any],
-    ) -> OptimizationPlan:
+        self, modules: TorchModuleSet, batch: TorchBatch, context: TorchStepContext
+    ) -> TorchStepResult:
+        del context
         import torch
 
-        return OptimizationPlan(
-            optimizer=torch.optim.Adam(
-                cast(Any, model).parameters(),
-                lr=float(config.get("learning_rate", 0.01)),
-            ),
-            gradient_accumulation_steps=int(config.get("accumulation_steps", 1)),
-            max_gradient_norm=float(config.get("max_gradient_norm", 1.0)),
+        model = cast(torch.nn.Module, modules["model"])
+        features = cast(torch.Tensor, batch.keyword["features"])
+        reconstruction = model(features)
+        squared_error = (reconstruction - cast(torch.Tensor, batch.targets)) ** 2
+        numerator = squared_error.sum()
+        element_count = int(squared_error.numel())
+        return TorchStepResult(
+            outputs={"output": reconstruction},
+            loss=TorchLossContribution(numerator, element_count),
+            coverage_counts=dict(batch.coverage_counts),
+            metrics={
+                "reconstruction_mse": TorchMetricContribution(
+                    float(numerator.detach().item()), element_count
+                )
+            },
         )
 
-    def metric_plan(self, config: Mapping[str, Any]) -> MetricPlan:
-        del config
-        return MetricPlan(factories={"reconstruction_mse": _mse})
+    def validation_step(
+        self, modules: TorchModuleSet, batch: TorchBatch, context: TorchStepContext
+    ) -> TorchStepResult:
+        return self.training_step(modules, batch, context)
 
-    def checkpoint_codec(self) -> object:
-        return _CheckpointCodec()
+    def configure_optimizers(
+        self, modules: TorchModuleSet, context: TorchBuildContext
+    ) -> TorchOptimizationPlan:
+        import torch
+
+        optimizer_config = context.runtime.algorithm_config.get("optimizer", {})
+        if not isinstance(optimizer_config, Mapping):
+            raise ValueError("Autoencoder optimizer config must be a mapping")
+        return TorchOptimizationPlan(
+            optimizer=torch.optim.Adam(
+                cast(torch.nn.Module, modules["model"]).parameters(),
+                lr=float(optimizer_config.get("learning_rate", 0.01)),
+                weight_decay=float(optimizer_config.get("weight_decay", 0.0)),
+            ),
+            gradient_accumulation_steps=int(
+                optimizer_config.get("accumulation_steps", 1)
+            ),
+            max_gradient_norm=float(optimizer_config.get("max_gradient_norm", 1.0)),
+        )
+
+    def metric_plan(self, context: TorchRuntimeContext) -> TorchMetricPlan:
+        del context
+        return TorchMetricPlan(
+            {"reconstruction_mse": "sum_count", "train_loss": "sum_count"}
+        )
+
+    def artifact_plan(self, context: TorchArtifactContext) -> TorchArtifactPlan:
+        config = context.stage.runtime.algorithm_config.get("model", {})
+        features = (
+            int(config.get("input_features", 4)) if isinstance(config, Mapping) else 4
+        )
+        return TorchArtifactPlan(
+            source_kind="torch_module",
+            input_signature=(
+                {"name": "features", "dtype": "float32", "shape": ("batch", features)},
+            ),
+            output_signature=(
+                {
+                    "name": "output",
+                    "dtype": "float32",
+                    "shape": ("batch", features),
+                },
+            ),
+            targets=(
+                {
+                    "name": "onnx-model",
+                    "format": "onnx",
+                    "exporter_id": "torch-onnx-v1",
+                    "options": {"dynamo": False},
+                },
+            ),
+            roles={"inference": "onnx-model"},
+        )
 
 
 __all__ = ["TabularAutoencoderRecipe"]

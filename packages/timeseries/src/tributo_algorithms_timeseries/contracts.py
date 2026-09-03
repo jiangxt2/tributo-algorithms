@@ -1,9 +1,14 @@
-"""Executable contracts for the official time-series Wheel."""
+"""Versioned contracts for the temporal convolution TorchRecipe."""
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from typing import Any
+
+
+def _digest(name: str) -> str:
+    return hashlib.sha256(f"tributo.timeseries.{name}.v2".encode()).hexdigest()
 
 
 class TimeSeriesConfigValidator:
@@ -12,8 +17,7 @@ class TimeSeriesConfigValidator:
 
     def validate(self, value: Mapping[str, Any]) -> Mapping[str, Any]:
         allowed = {"metrics", "model", "optimizer", "output", "ray", "training"}
-        unknown = sorted(set(value) - allowed)
-        if unknown:
+        if unknown := sorted(set(value) - allowed):
             raise ValueError(f"unknown time-series config keys: {unknown}")
         for name in allowed:
             item = value.get(name)
@@ -36,13 +40,17 @@ class WindowInputValidator:
         if not isinstance(bindings, list) or len(bindings) != 1:
             raise ValueError("time-series training requires one train binding")
         binding = bindings[0]
-        if (
-            not isinstance(binding, Mapping)
-            or len(binding.get("feature_names", ())) < 2
-        ):
+        if not isinstance(binding, Mapping) or binding.get("role", "train") != "train":
+            raise ValueError("time-series input requires a train binding")
+        features = binding.get("feature_names")
+        if not isinstance(features, list) or len(features) < 2:
             raise ValueError("time-series input requires at least two ordered lags")
-        if not binding.get("label_name"):
+        if not isinstance(binding.get("label_name"), str) or not binding["label_name"]:
             raise ValueError("time-series input requires a label")
+        if binding.get("sample_weight_name") is not None:
+            raise ValueError(
+                "time-series algorithms do not support sample-weight binding"
+            )
         return value
 
 
@@ -51,10 +59,10 @@ class TimeSeriesOutputValidator:
     schema_digest = "7" * 64
 
     def validate(self, value: Mapping[str, Any]) -> Mapping[str, Any]:
-        if value.get("status") != "succeeded":
-            raise ValueError("time-series execution failed")
         outputs = value.get("outputs")
-        if not isinstance(outputs, Mapping) or not outputs.get("bundle_uri"):
+        if value.get("status") != "succeeded" or not isinstance(outputs, Mapping):
+            raise ValueError("time-series execution failed")
+        if not isinstance(outputs.get("bundle_uri"), str) or not outputs["bundle_uri"]:
             raise ValueError("time-series output requires a Bundle")
         return value
 
@@ -72,8 +80,20 @@ class WindowCoverageValidator:
         return value
 
 
+class TemporalConvTensorInputValidator(WindowInputValidator):
+    api_version = 1
+    schema_digest = _digest("tcn-window-input")
+
+
+class TemporalConvTorchCoverageValidator(WindowCoverageValidator):
+    api_version = 1
+    schema_digest = _digest("tcn-coverage")
+
+
 __all__ = [
     "TimeSeriesConfigValidator",
+    "TemporalConvTensorInputValidator",
+    "TemporalConvTorchCoverageValidator",
     "TimeSeriesOutputValidator",
     "WindowCoverageValidator",
     "WindowInputValidator",

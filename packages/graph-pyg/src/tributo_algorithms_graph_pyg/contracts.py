@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from typing import Any
+
+
+def _digest(name: str) -> str:
+    return hashlib.sha256(f"tributo.graph-pyg.{name}.v2".encode()).hexdigest()
 
 
 class GraphConfigValidator:
@@ -27,6 +32,12 @@ class GraphConfigValidator:
             output.get("bundle_uri"), str
         ):
             raise ValueError("output.bundle_uri is required")
+        training = normalized.get("training", {})
+        if not isinstance(training, Mapping):
+            raise ValueError("training must be a mapping")
+        epochs = training.get("epochs", 2)
+        if not isinstance(epochs, int) or isinstance(epochs, bool) or epochs < 1:
+            raise ValueError("training.epochs must be positive")
         return normalized
 
 
@@ -58,9 +69,16 @@ class HomogeneousGraphInputValidator:
         descriptors = value.get("descriptors")
         if not isinstance(bindings, list) or not isinstance(descriptors, Mapping):
             raise ValueError("graph input requires bindings and descriptors")
-        by_role = {
-            item.get("name"): item for item in bindings if isinstance(item, Mapping)
-        }
+        if len(bindings) != 3 or any(
+            not isinstance(item, Mapping) for item in bindings
+        ):
+            raise ValueError("graph input bindings must contain three mapping roles")
+        names = [item.get("name") for item in bindings]
+        if any(not isinstance(name, str) or not name for name in names) or len(
+            set(names)
+        ) != len(names):
+            raise ValueError("graph input binding roles must be unique names")
+        by_role = {item["name"]: item for item in bindings}
         if set(by_role) != {"edges", "nodes", "train"}:
             raise ValueError(
                 "graph input requires exactly nodes, edges, and train roles"
@@ -87,9 +105,18 @@ class RelationalGraphInputValidator(HomogeneousGraphInputValidator):
         descriptors = value.get("descriptors")
         if not isinstance(bindings, list) or not isinstance(descriptors, Mapping):
             raise ValueError("relational graph input requires bindings and descriptors")
-        by_role = {
-            item.get("name"): item for item in bindings if isinstance(item, Mapping)
-        }
+        if len(bindings) != 3 or any(
+            not isinstance(item, Mapping) for item in bindings
+        ):
+            raise ValueError(
+                "relational graph input bindings must contain three mapping roles"
+            )
+        names = [item.get("name") for item in bindings]
+        if any(not isinstance(name, str) or not name for name in names) or len(
+            set(names)
+        ) != len(names):
+            raise ValueError("relational graph binding roles must be unique names")
+        by_role = {item["name"]: item for item in bindings}
         if set(by_role) != {"edges", "nodes", "train"}:
             raise ValueError("R-GCN requires nodes, edges, and train roles")
         if value.get("primary_role") != "train" or set(descriptors) != set(by_role):
@@ -113,7 +140,11 @@ class GraphOutputValidator:
         if value.get("status") != "succeeded":
             raise ValueError("graph training did not succeed")
         outputs = value.get("outputs")
-        if not isinstance(outputs, Mapping) or not outputs.get("bundle_uri"):
+        if (
+            not isinstance(outputs, Mapping)
+            or not isinstance(outputs.get("bundle_uri"), str)
+            or not outputs["bundle_uri"]
+        ):
             raise ValueError("graph output requires bundle_uri")
         return value
 
@@ -168,12 +199,62 @@ class RelationalGraphCoverageValidator(GraphCoverageValidator):
         return validated
 
 
+class GraphSAGETorchInputValidator(HomogeneousGraphInputValidator):
+    api_version = 1
+    schema_digest = _digest("graphsage-input")
+
+    def validate(self, value: Mapping[str, Any]) -> Mapping[str, Any]:
+        validated = super().validate(value)
+        bindings = validated.get("bindings")
+        if not isinstance(bindings, list):
+            raise ValueError("graph input bindings are malformed")
+        for binding in bindings:
+            if (
+                isinstance(binding, Mapping)
+                and binding.get("sample_weight_name") is not None
+            ):
+                raise ValueError("GraphSAGE does not support sample-weight binding")
+        return validated
+
+
+class RGCNTorchInputValidator(RelationalGraphInputValidator):
+    api_version = 1
+    schema_digest = _digest("rgcn-input")
+
+    def validate(self, value: Mapping[str, Any]) -> Mapping[str, Any]:
+        validated = super().validate(value)
+        bindings = validated.get("bindings")
+        if not isinstance(bindings, list):
+            raise ValueError("R-GCN input bindings are malformed")
+        for binding in bindings:
+            if (
+                isinstance(binding, Mapping)
+                and binding.get("sample_weight_name") is not None
+            ):
+                raise ValueError("R-GCN does not support sample-weight binding")
+        return validated
+
+
+class GraphSAGETorchCoverageValidator(GraphCoverageValidator):
+    api_version = 1
+    schema_digest = _digest("graphsage-coverage")
+
+
+class RGCNTorchCoverageValidator(RelationalGraphCoverageValidator):
+    api_version = 1
+    schema_digest = _digest("rgcn-coverage")
+
+
 __all__ = [
     "GraphConfigValidator",
+    "GraphSAGETorchCoverageValidator",
+    "GraphSAGETorchInputValidator",
     "GraphCoverageValidator",
     "GraphOutputValidator",
     "HomogeneousGraphInputValidator",
     "RelationalGraphConfigValidator",
     "RelationalGraphCoverageValidator",
     "RelationalGraphInputValidator",
+    "RGCNTorchCoverageValidator",
+    "RGCNTorchInputValidator",
 ]

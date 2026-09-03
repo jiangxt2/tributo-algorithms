@@ -1,44 +1,71 @@
-"""Tests for the official self-supervised Autoencoder."""
+"""Tests for the typed self-supervised Autoencoder TorchRecipe."""
 
 from __future__ import annotations
 
+import hashlib
+
 import torch
-from tributo.algorithms import TrainingStepResult
-from tributo.algorithms.api import DistributionStrategy
+from tributo.algorithms import (
+    DistributionStrategy,
+    TorchBatchContext,
+    TorchBuildContext,
+    TorchRuntimeContext,
+    TorchStageContext,
+    TorchStageRunIdentity,
+    TorchStepContext,
+)
 from tributo_algorithms_representation import TABULAR_AUTOENCODER_DESCRIPTOR
 from tributo_algorithms_representation.recipe import TabularAutoencoderRecipe
 
 
-def test_autoencoder_descriptor_uses_recipe_v2() -> None:
+def _context() -> TorchBuildContext:
+    policy = TABULAR_AUTOENCODER_DESCRIPTOR.registration.distribution_spec.policy
+    identity = TorchStageRunIdentity(
+        "aabbccdd",
+        "11223344",
+        "train",
+        1,
+        "ae",
+        "ae",
+        hashlib.sha256(b"ae").hexdigest(),
+        policy.digest,
+        policy.execution_plan.digest,
+    )
+    runtime = TorchRuntimeContext(
+        {"model": {"input_features": 3, "latent_features": 2}},
+        "ae",
+        1,
+        policy.digest,
+        policy.execution_plan.digest,
+        identity,
+        input_binding_digest="1" * 64,
+    )
+    stage = TorchStageContext(runtime, "train", 0, True, ("train",))
+    return TorchBuildContext(runtime, stage)
+
+
+def test_autoencoder_descriptor_uses_torch_runtime() -> None:
     registration = TABULAR_AUTOENCODER_DESCRIPTOR.registration
-    assert registration.distribution_spec is not None
     assert (
-        registration.distribution_spec.strategy
-        is DistributionStrategy.RAY_TRAIN_RECIPE_V2
+        registration.distribution_spec.strategy is DistributionStrategy.RAY_TRAIN_TORCH
     )
     assert registration.contract_bindings is not None
 
 
-def test_autoencoder_batch_adapter_requires_no_label() -> None:
+def test_autoencoder_uses_element_normalizer() -> None:
     recipe = TabularAutoencoderRecipe()
-    modules = recipe.build_modules(
-        {"model": {"input_features": 3, "latent_features": 2}}
+    build = _context()
+    batch_context = TorchBatchContext(build.stage, ("f0", "f1", "f2"))
+    modules = recipe.build_modules(build)
+    adapted = recipe.adapt_batch(
+        {
+            "f0": torch.tensor([0.0, 1.0]),
+            "f1": torch.tensor([1.0, 0.0]),
+            "f2": torch.tensor([0.5, 0.5]),
+        },
+        batch_context,
     )
-    batch = {
-        "f0": torch.tensor([0.0, 1.0]),
-        "f1": torch.tensor([1.0, 0.0]),
-        "f2": torch.tensor([0.5, 0.5]),
-    }
-    features, targets, weights, rows = recipe.batch_adapter(
-        batch,
-        feature_names=("f0", "f1", "f2"),
-        label_name=None,
-        weight_name=None,
-        config={},
-    )
-    step = recipe.training_step(modules, features, targets, weights, {})
-
-    assert isinstance(step, TrainingStepResult)
-    assert features.shape == targets.shape == (2, 3)
-    assert step.loss.ndim == 0
-    assert rows == 2
+    result = recipe.training_step(modules, adapted, TorchStepContext(build.stage, 0, 0))
+    assert result.outputs["output"].shape == (2, 3)
+    assert result.loss.normalizer == 6
+    assert result.metrics["reconstruction_mse"].normalizer == 6

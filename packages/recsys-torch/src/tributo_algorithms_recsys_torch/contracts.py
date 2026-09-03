@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from typing import Any
+
+
+def _digest(name: str) -> str:
+    return hashlib.sha256(f"tributo.recsys-torch.{name}.v2".encode()).hexdigest()
 
 
 class TwoTowerConfigValidator:
@@ -23,7 +28,11 @@ class TwoTowerConfigValidator:
             if not isinstance(count, int) or isinstance(count, bool) or count < 1:
                 raise ValueError(f"model.{name} must be a positive integer")
         output = normalized.get("output")
-        if not isinstance(output, Mapping) or not output.get("bundle_uri"):
+        if (
+            not isinstance(output, Mapping)
+            or not isinstance(output.get("bundle_uri"), str)
+            or not output["bundle_uri"]
+        ):
             raise ValueError("output.bundle_uri is required")
         return normalized
 
@@ -39,8 +48,10 @@ class PairInputValidator:
         binding = bindings[0]
         if (
             not isinstance(binding, Mapping)
+            or binding.get("role", "train") != "train"
             or len(binding.get("feature_names", ())) != 2
             or not binding.get("label_name")
+            or binding.get("sample_weight_name") is not None
         ):
             raise ValueError("Two-Tower requires user ID, item ID, and label columns")
         return value
@@ -54,7 +65,7 @@ class TwoTowerOutputValidator:
         outputs = value.get("outputs")
         if value.get("status") != "succeeded" or not isinstance(outputs, Mapping):
             raise ValueError("Two-Tower execution failed")
-        if not outputs.get("bundle_uri"):
+        if not isinstance(outputs.get("bundle_uri"), str) or not outputs["bundle_uri"]:
             raise ValueError("Two-Tower output requires Bundle")
         return value
 
@@ -126,7 +137,10 @@ class JaggedConfigValidator:
             raise ValueError("data.inference_history_width must be positive")
         if not value["ray"].get("storage_path"):
             raise ValueError("ray.storage_path is required")
-        if not value["output"].get("bundle_uri"):
+        if (
+            not isinstance(value["output"].get("bundle_uri"), str)
+            or not value["output"]["bundle_uri"]
+        ):
             raise ValueError("output.bundle_uri is required")
         return dict(value)
 
@@ -159,7 +173,7 @@ class JaggedOutputValidator:
         outputs = value.get("outputs")
         if value.get("status") != "succeeded" or not isinstance(outputs, Mapping):
             raise ValueError("jagged recommendation failed")
-        if not outputs.get("bundle_uri"):
+        if not isinstance(outputs.get("bundle_uri"), str) or not outputs["bundle_uri"]:
             raise ValueError("jagged recommendation requires model Bundle")
         return value
 
@@ -208,13 +222,55 @@ class JaggedCoverageValidator:
         return value
 
 
+class JaggedTorchInputValidator(JaggedInputValidator):
+    api_version = 1
+    schema_digest = _digest("jagged-input")
+
+    def validate(self, value: Mapping[str, Any]) -> Mapping[str, Any]:
+        validated = super().validate(value)
+        bindings = validated.get("bindings")
+        binding = bindings[0] if isinstance(bindings, list) else None
+        if (
+            not isinstance(binding, Mapping)
+            or binding.get("role", "train") != "train"
+            or binding.get("sample_weight_name") is not None
+            or not all(
+                isinstance(name, str) and name
+                for name in binding.get("feature_names", ())
+            )
+        ):
+            raise ValueError(
+                "jagged recommendation requires named, unweighted train input"
+            )
+        return validated
+
+
+class JaggedTorchCoverageValidator(JaggedCoverageValidator):
+    api_version = 1
+    schema_digest = _digest("jagged-coverage")
+
+
+class TwoTowerTensorInputValidator(PairInputValidator):
+    api_version = 1
+    schema_digest = _digest("two-tower-input")
+
+
+class TwoTowerTorchCoverageValidator(PairCoverageValidator):
+    api_version = 1
+    schema_digest = _digest("two-tower-coverage")
+
+
 __all__ = [
     "PairCoverageValidator",
     "PairInputValidator",
+    "TwoTowerTensorInputValidator",
+    "TwoTowerTorchCoverageValidator",
     "TwoTowerConfigValidator",
     "TwoTowerOutputValidator",
     "JaggedConfigValidator",
     "JaggedCoverageValidator",
     "JaggedInputValidator",
     "JaggedOutputValidator",
+    "JaggedTorchCoverageValidator",
+    "JaggedTorchInputValidator",
 ]

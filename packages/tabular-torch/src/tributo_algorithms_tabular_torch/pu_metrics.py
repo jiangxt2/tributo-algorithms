@@ -40,8 +40,8 @@ def pu_precision_score(
         PU-corrected precision value.
     """
     y_pred = (y_pred_proba >= threshold).astype(int)
-    tp = np.sum((y_pred == 1) & (y_true == 1))
-    fp = np.sum((y_pred == 1) & (y_true == 0))
+    tp: int = int(np.sum((y_pred == 1) & (y_true == 1)))
+    fp: int = int(np.sum((y_pred == 1) & (y_true == 0)))
 
     # PU correction: part of FP are actually true positives
     corrected_fp = fp * (1 - class_prior)
@@ -114,13 +114,13 @@ def pu_auc_score(
         y_pred = (y_pred_proba >= thresh).astype(int)
 
         # TPR: recall on positive samples (labeled positives are certain)
-        tp = np.sum((y_pred == 1) & (y_true == 1))
-        fn = np.sum((y_pred == 0) & (y_true == 1))
+        tp: int = int(np.sum((y_pred == 1) & (y_true == 1)))
+        fn: int = int(np.sum((y_pred == 0) & (y_true == 1)))
         tpr = tp / (tp + fn) if (tp + fn) > 0 else 0.0
 
         # FPR: false positive rate in unlabeled samples (corrected by class_prior)
-        fp = np.sum((y_pred == 1) & (y_true == 0))
-        tn = np.sum((y_pred == 0) & (y_true == 0))
+        fp: int = int(np.sum((y_pred == 1) & (y_true == 0)))
+        tn: int = int(np.sum((y_pred == 0) & (y_true == 0)))
         # True negatives count in unlabeled ≈ n_unlabeled * (1 - π_p)
         # But we use weighting directly: FP contribution multiplied by (1 - π_p)
         total_unlabeled = fp + tn
@@ -261,8 +261,8 @@ def _standard_recall(
         Recall value.
     """
     y_pred = (y_pred_proba >= threshold).astype(int)
-    tp = np.sum((y_pred == 1) & (y_true == 1))
-    fn = np.sum((y_pred == 0) & (y_true == 1))
+    tp: int = int(np.sum((y_pred == 1) & (y_true == 1)))
+    fn: int = int(np.sum((y_pred == 0) & (y_true == 1)))
 
     if tp + fn == 0:
         return 0.0

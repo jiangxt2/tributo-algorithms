@@ -1,43 +1,40 @@
-"""Framework-native distributed GraphSAGE implementation."""
+"""RayTorchAdapter implementations for bounded PyG graph classifiers."""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 from collections.abc import Mapping
+from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
-
-if TYPE_CHECKING:
-    from ray.train import ScalingConfig
+from typing import Any, cast
 
 from tributo.algorithms.api import (
     AlgorithmConfigurationError,
     AlgorithmExecutionError,
-    AlgorithmExecutionResult,
-    ResolvedAlgorithmPlan,
+    TorchAccumulationWindow,
+    TorchBackwardContext,
+    TorchCheckpointRef,
+    TorchLossContribution,
+    TorchMetricContribution,
+    TorchMetricPolicy,
+    TorchMetricReductionContext,
+    apply_torch_loss_backward,
+    reduce_torch_metrics,
+    report_torch_checkpoint,
 )
-from tributo.algorithms.spi import FrameworkNativeAlgorithm
+from tributo.algorithms.spi import (
+    RayTorchAdapter,
+    TorchArtifactContext,
+    TorchArtifactPlan,
+    TorchCheckpointContext,
+    TorchRuntimeContext,
+    TorchStageContext,
+    TorchWorkerCheckpointContext,
+)
 from tributo.util.annotations import PublicAPI
-
-
-class _EvidenceCollector:
-    """Collect exactly one bounded record from each Ray Train worker."""
-
-    def __init__(self) -> None:
-        self._records: dict[int, dict[str, object]] = {}
-
-    def record(self, value: dict[str, object]) -> None:
-        rank = value.get("rank")
-        if not isinstance(rank, int) or isinstance(rank, bool):
-            raise TypeError("graph evidence rank must be an integer")
-        if rank in self._records:
-            raise ValueError(f"duplicate graph worker evidence rank: {rank}")
-        self._records[rank] = dict(value)
-
-    def snapshot(self) -> list[dict[str, object]]:
-        return [self._records[rank] for rank in sorted(self._records)]
 
 
 def _build_model(
@@ -50,6 +47,8 @@ def _build_model(
 ) -> object:
     import torch
 
+    if min(input_features, hidden_features, num_classes, num_relations) < 1:
+        raise ValueError("graph model dimensions must be positive")
     if model_kind == "rgcn":
         from torch_geometric.nn import RGCNConv
 
@@ -60,15 +59,10 @@ def _build_model(
                 self.conv2 = RGCNConv(hidden_features, num_classes, num_relations)
 
             def forward(
-                self,
-                x: object,
-                edge_index: object,
-                edge_type: object,
+                self, x: object, edge_index: object, edge_type: object
             ) -> object:
-                values = self.conv1(
-                    cast(Any, x), cast(Any, edge_index), cast(Any, edge_type)
-                ).relu()
-                return self.conv2(values, cast(Any, edge_index), cast(Any, edge_type))
+                values = self.conv1(x, edge_index, edge_type).relu()
+                return self.conv2(values, edge_index, edge_type)
 
         return RGCN()
     if model_kind != "graphsage":
@@ -82,14 +76,13 @@ def _build_model(
             self.conv2 = SAGEConv(hidden_features, num_classes)
 
         def forward(self, x: object, edge_index: object) -> object:
-            values = self.conv1(cast(Any, x), cast(Any, edge_index)).relu()
-            return self.conv2(values, cast(Any, edge_index))
+            values = self.conv1(x, edge_index).relu()
+            return self.conv2(values, edge_index)
 
     return GraphSAGE()
 
 
 def _node_lookup_model(model: object, logits: object) -> object:
-    """Preserve trained weights and expose bounded transductive lookup."""
     import torch
 
     trained = cast(torch.nn.Module, model)
@@ -101,7 +94,7 @@ def _node_lookup_model(model: object, logits: object) -> object:
             self.conv2 = cast(Any, trained).conv2
             self.register_buffer(
                 "inference_logits",
-                cast(torch.Tensor, logits).detach().to(dtype=torch.float32),
+                cast(torch.Tensor, logits).detach().float(),
                 persistent=False,
             )
 
@@ -109,74 +102,77 @@ def _node_lookup_model(model: object, logits: object) -> object:
             values = cast(torch.Tensor, node_id).long()
             stored = cast(torch.Tensor, self.inference_logits)
             valid = values.ge(0).logical_and(values.lt(stored.shape[0]))
-            safe_values = values.clamp(min=0, max=stored.shape[0] - 1)
-            selected = stored[safe_values]
-            logits = torch.where(
+            safe = values.clamp(min=0, max=stored.shape[0] - 1)
+            selected = stored[safe]
+            masked = torch.where(
                 valid.unsqueeze(-1), selected, torch.zeros_like(selected)
             )
-            return torch.cat(
-                (logits, valid.unsqueeze(-1).to(dtype=logits.dtype)), dim=1
-            )
+            return torch.cat((masked, valid.unsqueeze(-1).float()), dim=1)
 
     return NodeLookupModel()
 
 
-def _scaling_config(plan: ResolvedAlgorithmPlan) -> "ScalingConfig":
-    """Build the public Ray Train resource and placement contract."""
-    from ray.train import ScalingConfig
-
-    return ScalingConfig(
-        num_workers=plan.runtime.worker_count,
-        use_gpu=plan.runtime.num_gpus > 0,
-        resources_per_worker={
-            "CPU": plan.runtime.num_cpus,
-            "GPU": plan.runtime.num_gpus,
-            **dict(plan.runtime.custom_resources),
-        },
-        placement_strategy="SPREAD",
-    )
-
-
 def _columns(iterator: object, names: tuple[str, ...]) -> dict[str, list[object]]:
-    iter_batches = getattr(iterator, "iter_batches", None)
-    if not callable(iter_batches):
+    method = getattr(iterator, "iter_batches", None)
+    if not callable(method):
         raise AlgorithmExecutionError("graph dataset shard is not iterable")
     output: dict[str, list[object]] = {name: [] for name in names}
-    for batch in iter_batches(batch_format="numpy"):
+    for batch in method(batch_format="numpy"):
         if not isinstance(batch, Mapping):
             raise AlgorithmExecutionError("graph dataset produced a non-columnar batch")
         for name in names:
             if name not in batch:
                 raise AlgorithmExecutionError(f"graph dataset is missing {name!r}")
             value = batch[name]
-            converted = value.tolist() if hasattr(value, "tolist") else value
-            if not isinstance(converted, (list, tuple)):
+            values = value.tolist() if hasattr(value, "tolist") else value
+            if not isinstance(values, (list, tuple)):
                 raise AlgorithmExecutionError(
-                    f"graph column {name!r} is not a bounded sequence"
+                    f"graph column {name!r} is not a sequence"
                 )
-            output[name].extend(converted)
+            output[name].extend(values)
     return output
+
+
+def _dataset_column_names(dataset: object) -> tuple[str, ...]:
+    schema = getattr(dataset, "schema", None)
+    if callable(schema):
+        value = schema()
+        names = getattr(value, "names", None)
+        if isinstance(names, (list, tuple)) and all(
+            isinstance(name, str) for name in names
+        ):
+            return tuple(names)
+    return ()
 
 
 def _state_digest(state: Mapping[str, object]) -> str:
     digest = hashlib.sha256()
     for name in sorted(state):
         tensor = cast(Any, state[name]).detach().cpu().contiguous()
-        digest.update(name.encode("utf-8"))
-        digest.update(str(tensor.dtype).encode("ascii"))
-        digest.update(str(tuple(tensor.shape)).encode("ascii"))
+        digest.update(name.encode())
+        digest.update(str(tensor.dtype).encode())
+        digest.update(str(tuple(tensor.shape)).encode())
         digest.update(tensor.numpy().tobytes())
     return digest.hexdigest()
 
 
 def _tensor_digest(value: object) -> str:
-    """Return a stable digest for one derived tensor without persisting its rows."""
     tensor = cast(Any, value).detach().cpu().contiguous()
     digest = hashlib.sha256()
-    digest.update(str(tensor.dtype).encode("ascii"))
-    digest.update(str(tuple(tensor.shape)).encode("ascii"))
+    digest.update(str(tensor.dtype).encode())
+    digest.update(str(tuple(tensor.shape)).encode())
     digest.update(tensor.numpy().tobytes())
     return digest.hexdigest()
+
+
+def _require_sha256(value: object, *, name: str) -> str:
+    if not isinstance(value, str) or len(value) != 64 or value != value.lower():
+        raise AlgorithmExecutionError(f"graph checkpoint {name} is invalid")
+    try:
+        int(value, 16)
+    except ValueError as exc:
+        raise AlgorithmExecutionError(f"graph checkpoint {name} is invalid") from exc
+    return value
 
 
 def _graph_identity_digest(
@@ -185,7 +181,6 @@ def _graph_identity_digest(
     node_feature_digest: str,
     node_feature_names: tuple[str, ...],
 ) -> str:
-    """Bind transductive node IDs to topology and feature values."""
     payload = {
         "schema_version": 1,
         "topology_digest": topology_digest,
@@ -193,17 +188,13 @@ def _graph_identity_digest(
         "node_feature_names": list(node_feature_names),
     }
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
 
 
 def _graph_source_fingerprint(
-    *,
-    model_digest: str,
-    graph_identity_digest: str,
-    inference_logits_digest: str,
+    *, model_digest: str, graph_identity_digest: str, inference_logits_digest: str
 ) -> str:
-    """Identify every state component embedded in the exported lookup model."""
     payload = {
         "schema_version": 1,
         "model_digest": model_digest,
@@ -211,157 +202,291 @@ def _graph_source_fingerprint(
         "inference_logits_digest": inference_logits_digest,
     }
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
 
 
-def _require_sha256(value: object, *, name: str) -> str:
-    if (
-        not isinstance(value, str)
-        or len(value) != 64
-        or any(character not in "0123456789abcdef" for character in value)
-    ):
-        raise AlgorithmExecutionError(f"graph checkpoint {name} is invalid")
-    return value
+def _load_checkpoint_state(
+    checkpoint_context: TorchWorkerCheckpointContext,
+    model: object,
+    optimizer: object,
+    *,
+    rank: int,
+) -> int:
+    if checkpoint_context.checkpoint is None:
+        return 0
+    if checkpoint_context.source != "ray_failure_retry":
+        raise AlgorithmExecutionError(
+            "graph adapters accept only Ray failure retry Checkpoints"
+        )
+    import torch
+
+    checkpoint = checkpoint_context.checkpoint.checkpoint
+    opener = getattr(checkpoint, "as_directory", None)
+    if not callable(opener):
+        raise AlgorithmExecutionError("graph retry checkpoint cannot be opened")
+    with opener() as directory:
+        root = Path(directory)
+        state_path = root / "model.pt"
+        optimizer_path = root / "optimizer.pt"
+        rng_path = root / "rng_state.pt"
+        if not state_path.is_file() or not optimizer_path.is_file():
+            raise AlgorithmExecutionError(
+                "graph retry checkpoint is missing model/optimizer state"
+            )
+        state = torch.load(state_path, map_location="cpu", weights_only=True)
+        target_model = cast(torch.nn.Module, getattr(model, "module", model))
+        target_model.load_state_dict(state)
+        cast(Any, optimizer).load_state_dict(
+            torch.load(optimizer_path, map_location="cpu", weights_only=True)
+        )
+        if rng_path.is_file():
+            payload = torch.load(rng_path, map_location="cpu", weights_only=True)
+            states = payload.get("states") if isinstance(payload, Mapping) else None
+            raw_state = (
+                states[rank]
+                if isinstance(states, list) and rank < len(states)
+                else payload
+            )
+            if isinstance(raw_state, bytes):
+                torch.set_rng_state(
+                    torch.frombuffer(bytearray(raw_state), dtype=torch.uint8).clone()
+                )
+            elif isinstance(raw_state, torch.Tensor):
+                torch.set_rng_state(raw_state.to(dtype=torch.uint8).cpu())
+            else:
+                raise AlgorithmExecutionError("graph retry RNG state is malformed")
+    descriptor = checkpoint_context.checkpoint.descriptor
+    return int(descriptor.completed_step) if descriptor is not None else 0
 
 
-def _graph_train_loop(config: dict[str, Any]) -> None:
+def _graph_train_loop(
+    config: Mapping[str, Any], checkpoint_context: TorchWorkerCheckpointContext
+) -> None:
     import ray
     import torch
     from ray import train
     from ray.train import Checkpoint
     from ray.train.torch import get_device, prepare_model
 
-    names = cast(dict[str, Any], config["columns"])
-    nodes = _columns(
-        train.get_dataset_shard("nodes"),
-        (names["node_id"], *names["node_features"]),
+    columns = config.get("columns")
+    names = (
+        {str(key): value for key, value in columns.items()}
+        if isinstance(columns, Mapping)
+        else {}
     )
-    edge_columns = [names["edge_source"], names["edge_destination"]]
-    edge_relation_name = names.get("edge_relation")
-    if edge_relation_name is not None:
-        edge_columns.append(edge_relation_name)
-    edges = _columns(train.get_dataset_shard("edges"), tuple(edge_columns))
+    nodes_dataset = train.get_dataset_shard("nodes")
+    edges_dataset = train.get_dataset_shard("edges")
+    train_dataset = train.get_dataset_shard("train")
+    if not names:
+        node_names = _dataset_column_names(nodes_dataset)
+        edge_names = _dataset_column_names(edges_dataset)
+        train_names = _dataset_column_names(train_dataset)
+        if len(node_names) < 2 or len(edge_names) < 2 or len(train_names) < 2:
+            raise AlgorithmConfigurationError(
+                "graph adapter columns cannot be inferred"
+            )
+        names = {
+            "node_id": node_names[0],
+            "node_features": list(node_names[1:]),
+            "edge_source": edge_names[0],
+            "edge_destination": edge_names[1],
+            "seed_node_id": train_names[0],
+            "seed_label": train_names[-1],
+        }
+        if len(edge_names) >= 3:
+            names["edge_relation"] = edge_names[2]
+    node_features = tuple(str(value) for value in names["node_features"])
+    nodes = _columns(nodes_dataset, (str(names["node_id"]), *node_features))
+    edge_columns: list[str] = [
+        str(names["edge_source"]),
+        str(names["edge_destination"]),
+    ]
+    if names.get("edge_relation") is not None:
+        edge_columns.append(str(names["edge_relation"]))
+    edges = _columns(edges_dataset, tuple(edge_columns))
     seeds = _columns(
-        train.get_dataset_shard("train"),
-        (names["seed_node_id"], names["seed_label"]),
+        train_dataset,
+        (str(names["seed_node_id"]), str(names["seed_label"])),
     )
-    raw_node_ids = [int(cast(Any, value)) for value in nodes[names["node_id"]]]
-    node_order = sorted(range(len(raw_node_ids)), key=raw_node_ids.__getitem__)
-    node_ids = [raw_node_ids[index] for index in node_order]
+    raw_node_ids = [int(cast(Any, value)) for value in nodes[str(names["node_id"])]]
+    order = sorted(range(len(raw_node_ids)), key=raw_node_ids.__getitem__)
+    node_ids = [raw_node_ids[index] for index in order]
     if node_ids != list(range(len(node_ids))):
         raise AlgorithmExecutionError(
-            "graph training requires contiguous node_id values ordered from zero"
+            "graph node IDs must be contiguous and zero-based"
         )
-    if not seeds[names["seed_node_id"]]:
+    if not seeds[str(names["seed_node_id"])]:
         raise AlgorithmExecutionError("every graph worker requires labeled seeds")
-
     device = get_device()
     x = torch.tensor(
         [
-            [
-                float(cast(Any, nodes[feature][source_index]))
-                for feature in names["node_features"]
-            ]
-            for source_index in node_order
+            [float(cast(Any, nodes[feature][index])) for feature in node_features]
+            for index in order
         ],
         dtype=torch.float32,
         device=device,
     )
-    raw_source = [int(cast(Any, value)) for value in edges[names["edge_source"]]]
-    raw_destination = [
-        int(cast(Any, value)) for value in edges[names["edge_destination"]]
+    source = [int(cast(Any, value)) for value in edges[str(names["edge_source"])]]
+    destination = [
+        int(cast(Any, value)) for value in edges[str(names["edge_destination"])]
     ]
-    relations: list[int] = []
-    if edge_relation_name is not None:
-        edge_records = sorted(
-            zip(
-                raw_source,
-                raw_destination,
-                (int(cast(Any, value)) for value in edges[edge_relation_name]),
-                strict=True,
-            )
-        )
-        edge_pairs = [(left, right) for left, right, _ in edge_records]
+    relations = (
+        [int(cast(Any, value)) for value in edges[str(names["edge_relation"])]]
+        if names.get("edge_relation") is not None
+        else []
+    )
+    if not source or len(source) != len(destination):
+        raise AlgorithmExecutionError("graph requires a non-empty edge list")
+    if len(relations) not in {0, len(source)}:
+        raise AlgorithmExecutionError("graph relation coverage is incomplete")
+    if relations:
+        edge_records = sorted(zip(source, destination, relations, strict=True))
+        source = [left for left, _, _ in edge_records]
+        destination = [right for _, right, _ in edge_records]
         relations = [relation for _, _, relation in edge_records]
     else:
-        edge_pairs = sorted(zip(raw_source, raw_destination, strict=True))
-    source = [left for left, _ in edge_pairs]
-    destination = [right for _, right in edge_pairs]
-    if not source or len(source) != len(destination):
-        raise AlgorithmExecutionError("GraphSAGE requires a non-empty edge list")
-    model_kind = str(config.get("model_kind", "graphsage"))
-    if edge_relation_name is not None:
-        edge_index_values = [source, destination]
-    else:
-        edge_index_values = [source + destination, destination + source]
+        edge_pairs = sorted(zip(source, destination, strict=True))
+        source = [left for left, _ in edge_pairs]
+        destination = [right for _, right in edge_pairs]
+    edge_index_values = (
+        [source, destination]
+        if relations
+        else [source + destination, destination + source]
+    )
     edge_index = torch.tensor(edge_index_values, dtype=torch.long, device=device)
     edge_type = (
         torch.tensor(relations, dtype=torch.long, device=device) if relations else None
     )
     seed_index = torch.tensor(
-        [int(cast(Any, value)) for value in seeds[names["seed_node_id"]]],
+        [int(cast(Any, value)) for value in seeds[str(names["seed_node_id"])]],
         dtype=torch.long,
         device=device,
     )
     labels = torch.tensor(
-        [int(cast(Any, value)) for value in seeds[names["seed_label"]]],
+        [int(cast(Any, value)) for value in seeds[str(names["seed_label"])]],
         dtype=torch.long,
         device=device,
     )
-
-    model_config = cast(dict[str, Any], config["model"])
+    model_config = config.get("model", {})
+    training = config.get("training", {})
+    if not isinstance(model_config, Mapping) or not isinstance(training, Mapping):
+        raise AlgorithmConfigurationError("graph model/training config is invalid")
+    node_count = len(node_ids)
+    if any(
+        value < 0 or value >= node_count
+        for value in (*source, *destination, *seed_index.tolist())
+    ):
+        raise AlgorithmExecutionError("graph node IDs are out of range")
+    num_classes = int(model_config.get("num_classes", 2))
+    if any(value < 0 or value >= num_classes for value in labels.tolist()):
+        raise AlgorithmExecutionError("graph labels are out of range")
+    if relations:
+        num_relations = int(model_config.get("num_relations", 1))
+        if any(value < 0 or value >= num_relations for value in relations):
+            raise AlgorithmExecutionError("graph relation IDs are out of range")
     model = prepare_model(
         cast(
             torch.nn.Module,
             _build_model(
-                len(names["node_features"]),
-                int(model_config["hidden_features"]),
-                int(model_config["num_classes"]),
-                model_kind=model_kind,
+                len(node_features),
+                int(model_config.get("hidden_features", 16)),
+                int(model_config.get("num_classes", 2)),
+                model_kind=str(config.get("model_kind", "graphsage")),
                 num_relations=int(model_config.get("num_relations", 1)),
             ),
         )
     )
     optimizer = torch.optim.Adam(
-        model.parameters(), lr=float(config["training"]["learning_rate"])
+        model.parameters(), lr=float(training.get("learning_rate", 0.01))
     )
-    epochs = int(config["training"]["epochs"])
+    context = train.get_context()
+    rank, world_size = context.get_world_rank(), context.get_world_size()
+    restored_step = _load_checkpoint_state(
+        checkpoint_context, model, optimizer, rank=rank
+    )
+    epochs = int(training.get("epochs", 2))
+    start_epoch = min(restored_step, epochs)
     loss_value = 0.0
-    accuracy = 0.0
-    for _ in range(epochs):
-        optimizer.zero_grad(set_to_none=True)
+    metric_rows = 0
+    metric_correct = 0
+    for epoch in range(start_epoch, epochs):
         logits = (
             model(x, edge_index, edge_type)
             if edge_type is not None
             else model(x, edge_index)
         )
         selected = logits[seed_index]
-        loss = torch.nn.functional.cross_entropy(selected, labels)
-        loss.backward()
-        optimizer.step()
-        loss_value = float(loss.detach().cpu())
-        accuracy = float((selected.argmax(dim=1) == labels).float().mean().cpu())
+        numerator = torch.nn.functional.cross_entropy(selected, labels, reduction="sum")
+        normalizer = int(labels.numel())
 
-    if torch.distributed.is_initialized():
-        torch.distributed.barrier()
-    unwrapped = cast(
-        torch.nn.Module,
-        model.module if hasattr(model, "module") else model,
+        def finalize(scale: float) -> None:
+            for parameter in model.parameters():
+                if parameter.grad is not None:
+                    parameter.grad.mul_(scale)
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(), float(training.get("max_gradient_norm", 1.0))
+            )
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+
+        def reduce_normalizer(value: float) -> float:
+            tensor = torch.tensor(value, dtype=torch.float64, device=device)
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                torch.distributed.all_reduce(tensor, op=torch.distributed.ReduceOp.SUM)
+            return float(tensor.item())
+
+        apply_torch_loss_backward(
+            TorchLossContribution(numerator, normalizer),
+            TorchAccumulationWindow(index=epoch, expected_micro_batches=1),
+            TorchBackwardContext(
+                world_size=world_size,
+                backward=lambda value: value.backward(),
+                reduce_normalizer=reduce_normalizer,
+                finalize_window=finalize,
+            ),
+        )
+        with torch.no_grad():
+            loss_value = float(numerator.detach().item() / max(normalizer, 1))
+            metric_rows = normalizer
+            metric_correct = int((selected.argmax(dim=1) == labels).sum().item())
+
+    def reduce_metric(
+        name: str, contribution: TorchMetricContribution, reducer: str
+    ) -> float:
+        del name, reducer
+        state = torch.tensor(
+            [contribution.numerator, contribution.normalizer],
+            dtype=torch.float64,
+            device=device,
+        )
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.all_reduce(state, op=torch.distributed.ReduceOp.SUM)
+        return float(state[0].item() / state[1].item()) if state[1].item() > 0 else 0.0
+
+    reduced_metrics = reduce_torch_metrics(
+        {
+            "train_loss": TorchMetricContribution(
+                loss_value * metric_rows, metric_rows
+            ),
+            "accuracy": TorchMetricContribution(metric_correct, metric_rows),
+        },
+        TorchMetricPolicy({"train_loss": "sum_count", "accuracy": "sum_count"}),
+        TorchMetricReductionContext(reduce_metric),
     )
-    unwrapped.eval()
+    model = cast(torch.nn.Module, model.module if hasattr(model, "module") else model)
+    model.eval()
     with torch.no_grad():
         inference_logits = (
             (
-                unwrapped(x, edge_index, edge_type)
+                model(x, edge_index, edge_type)
                 if edge_type is not None
-                else unwrapped(x, edge_index)
+                else model(x, edge_index)
             )
             .detach()
             .cpu()
         )
-    state = cast(Mapping[str, object], unwrapped.state_dict())
-    model_digest = _state_digest(state)
+    model_digest = _state_digest(cast(Mapping[str, object], model.state_dict()))
     topology_digest = hashlib.sha256(
         json.dumps(
             {
@@ -372,37 +497,30 @@ def _graph_train_loop(config: dict[str, Any]) -> None:
             },
             sort_keys=True,
             separators=(",", ":"),
-        ).encode("utf-8")
+        ).encode()
     ).hexdigest()
     node_feature_digest = _tensor_digest(x)
     graph_identity_digest = _graph_identity_digest(
         topology_digest=topology_digest,
         node_feature_digest=node_feature_digest,
-        node_feature_names=tuple(str(value) for value in names["node_features"]),
+        node_feature_names=node_features,
     )
     inference_logits_digest = _tensor_digest(inference_logits)
-
-    context = train.get_context()
-    rank = context.get_world_rank()
-    world_size = context.get_world_size()
-    runtime = ray.get_runtime_context()
-    assigned = runtime.get_assigned_resources()
-    evidence = {
-        "worker_id": str(runtime.get_worker_id()),
-        "node_id": str(runtime.get_node_id()),
+    assigned = ray.get_runtime_context().get_assigned_resources()
+    worker = {
+        "worker_id": str(ray.get_runtime_context().get_worker_id()),
+        "node_id": str(ray.get_runtime_context().get_node_id()),
         "rank": rank,
         "world_size": world_size,
-        "shard_id": hashlib.sha256(
-            f"{config['binding_digest']}:{rank}/{world_size}".encode("ascii")
-        ).hexdigest(),
+        "shard_id": f"train-{rank}",
         "rows_processed": len(labels),
         "input_rows": {
             "train": len(labels),
             "nodes": len(node_ids),
             "edges": len(source),
         },
-        "batch_count": epochs,
-        "collective_steps": epochs,
+        "batch_count": max(epochs - start_epoch, 0),
+        "collective_steps": max(epochs - start_epoch, 0),
         "model_state_digest": model_digest,
         "topology_digest": topology_digest,
         "node_feature_digest": node_feature_digest,
@@ -412,464 +530,395 @@ def _graph_train_loop(config: dict[str, Any]) -> None:
         "resources": {
             "num_cpus": float(assigned.get("CPU", 0.0)),
             "num_gpus": float(assigned.get("GPU", 0.0)),
-            "custom": {
-                str(name): float(value)
-                for name, value in assigned.items()
-                if name not in {"CPU", "GPU", "memory", "object_store_memory"}
-            },
         },
     }
-    ray.get(config["evidence_actor"].record.remote(evidence))
+    workers: list[object] = [worker] * world_size
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.all_gather_object(workers, worker)
+    descriptor_context = checkpoint_context.stage
+    with tempfile.TemporaryDirectory(prefix="tributo-graph-checkpoint-") as directory:
+        root = Path(directory)
+        torch.save(model.state_dict(), root / "model.pt")
+        torch.save(optimizer.state_dict(), root / "optimizer.pt")
+        rng_state = torch.get_rng_state().cpu().numpy().tobytes()
+        rng_states: list[object] = [rng_state] * world_size
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.all_gather_object(rng_states, rng_state)
+        torch.save(
+            {"world_size": world_size, "states": rng_states}, root / "rng_state.pt"
+        )
+        torch.save(inference_logits, root / "inference_logits.pt")
+        (root / "model_config.json").write_text(
+            json.dumps(
+                {
+                    "input_features": len(node_features),
+                    "hidden_features": int(model_config.get("hidden_features", 16)),
+                    "num_classes": int(model_config.get("num_classes", 2)),
+                    "node_features": list(node_features),
+                    "model_kind": str(config.get("model_kind", "graphsage")),
+                    "num_relations": int(model_config.get("num_relations", 1)),
+                    "graph_identity_version": 1,
+                    "topology_digest": topology_digest,
+                    "node_feature_digest": node_feature_digest,
+                    "graph_identity_digest": graph_identity_digest,
+                    "inference_logits_digest": inference_logits_digest,
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
 
-    checkpoint = None
-    if rank == 0:
-        with tempfile.TemporaryDirectory(prefix="tributo-graphsage-") as directory:
-            root = Path(directory)
-            torch.save(dict(state), root / "model.pt")
-            torch.save(inference_logits, root / "inference_logits.pt")
-            (root / "model_config.json").write_text(
-                json.dumps(
-                    {
-                        "input_features": len(names["node_features"]),
-                        "hidden_features": int(model_config["hidden_features"]),
-                        "num_classes": int(model_config["num_classes"]),
-                        "node_features": list(names["node_features"]),
-                        "model_kind": model_kind,
-                        "num_relations": int(model_config.get("num_relations", 1)),
-                        "graph_identity_version": 1,
-                        "topology_digest": topology_digest,
-                        "node_feature_digest": node_feature_digest,
-                        "graph_identity_digest": graph_identity_digest,
-                        "inference_logits_digest": inference_logits_digest,
-                    },
-                    sort_keys=True,
-                ),
-                encoding="utf-8",
-            )
-            checkpoint = Checkpoint.from_directory(root)
-            train.report(
-                {"train_loss": loss_value, "accuracy": accuracy},
-                checkpoint=checkpoint,
-            )
-    else:
-        train.report({"train_loss": loss_value, "accuracy": accuracy})
+        class Draft:
+            checkpoint_dir: str | os.PathLike[str] = str(root)
+
+            def report(
+                self,
+                *,
+                metrics: Mapping[str, object],
+                stage_context: object,
+                completed_step: int,
+            ) -> None:
+                del stage_context, completed_step
+                checkpoint = Checkpoint.from_directory(str(root)) if rank == 0 else None
+                train.report(dict(metrics), checkpoint=checkpoint)
+
+        report_torch_checkpoint(
+            {
+                "train_loss": reduced_metrics.values["train_loss"],
+                "accuracy": reduced_metrics.values["accuracy"],
+                "execution_workers": workers,
+                "model_state_digest": model_digest,
+            },
+            Draft(),
+            descriptor_context,
+            epochs,
+        )
 
 
 @PublicAPI(stability="alpha")
-class DistributedGraphSAGE(FrameworkNativeAlgorithm):
-    """Train homogeneous full-neighborhood GraphSAGE with Ray Train DDP."""
+class DistributedGraphSAGE(RayTorchAdapter):
+    """Train homogeneous full-neighborhood GraphSAGE with Core-owned Ray Train."""
 
     model_kind = "graphsage"
 
-    def __init__(self, plan: ResolvedAlgorithmPlan) -> None:
-        self.plan = plan
-        self._collector: Any | None = None
-        if plan.runtime.resume_from is not None:
-            raise AlgorithmConfigurationError(
-                f"{self.model_kind} checkpoint resume is not supported by version 0.1"
-            )
-
-    def validate_environment(self) -> None:
+    def validate_environment(self, context: TorchRuntimeContext) -> None:
+        del context
         try:
             import torch
             import torch_geometric
-            from ray.train.torch import TorchTrainer
         except ImportError as exc:
             raise AlgorithmConfigurationError(
-                "graph training requires Ray Train, torch, and torch-geometric"
+                "GraphSAGE requires torch and torch-geometric"
             ) from exc
-        if (
-            not torch.__version__
-            or not torch_geometric.__version__
-            or TorchTrainer is None
-        ):
-            raise AlgorithmConfigurationError("graph training environment is invalid")
+        if not torch.__version__ or not torch_geometric.__version__:
+            raise AlgorithmConfigurationError("GraphSAGE environment is invalid")
 
-    def bind_datasets(self, datasets: Mapping[str, object]) -> Mapping[str, object]:
+    def bind_datasets(
+        self, datasets: Mapping[str, object], context: TorchStageContext
+    ) -> Mapping[str, object]:
+        del context
         if set(datasets) != {"edges", "nodes", "train"}:
             raise AlgorithmConfigurationError(
                 "graph training requires nodes, edges, and train datasets"
             )
         return dict(datasets)
 
-    def build_trainer(
-        self,
-        config: Mapping[str, Any],
-        datasets: Mapping[str, object],
-    ) -> object:
-        import ray
-        from ray.train import DataConfig, RunConfig
-        from ray.train.torch import TorchTrainer
+    def worker_config(self, context: TorchStageContext) -> Mapping[str, object]:
+        config = {
+            key: value
+            for key, value in context.runtime.algorithm_config.items()
+            if key not in {"ray", "output"}
+        }
+        config.setdefault("model_kind", self.model_kind)
+        bindings = context.runtime.input_bindings
 
-        model_config = dict(cast(Mapping[str, Any], config.get("model", {})))
-        training_config = dict(cast(Mapping[str, Any], config.get("training", {})))
-        ray_config = dict(cast(Mapping[str, Any], config.get("ray", {})))
-        model_config.setdefault("hidden_features", 16)
-        model_config.setdefault("num_classes", 2)
-        if self.model_kind == "rgcn":
-            model_config.setdefault("num_relations", 2)
-        training_config.setdefault("epochs", 2)
-        training_config.setdefault("learning_rate", 0.01)
-        if any(
-            int(model_config[name]) < 1 for name in ("hidden_features", "num_classes")
-        ):
-            raise AlgorithmConfigurationError("graph model dimensions must be positive")
-        if self.model_kind == "rgcn" and int(model_config["num_relations"]) < 1:
-            raise AlgorithmConfigurationError("R-GCN num_relations must be positive")
+        def binding_for(role: str) -> Mapping[str, object]:
+            binding = bindings.get(role)
+            if not isinstance(binding, Mapping):
+                raise AlgorithmConfigurationError(
+                    f"graph Stage context is missing the {role} binding"
+                )
+            return binding
+
+        node_binding = binding_for("nodes")
+        edge_binding = binding_for("edges")
+        train_binding = binding_for("train")
+
+        def feature_names(binding: Mapping[str, object]) -> tuple[object, ...]:
+            values = binding.get("feature_names", ())
+            return tuple(values) if isinstance(values, (list, tuple)) else ()
+
+        node_features = feature_names(node_binding)
+        edge_features = feature_names(edge_binding)
+        train_features = feature_names(train_binding)
+        label_name = train_binding.get("label_name")
         if (
-            int(training_config["epochs"]) < 1
-            or float(training_config["learning_rate"]) <= 0
+            len(node_features) < 2
+            or len(edge_features) < 2
+            or len(train_features) != 1
+            or not isinstance(label_name, str)
+            or not label_name
         ):
-            raise AlgorithmConfigurationError("graph training controls are invalid")
-
-        bindings = self.plan.input_bindings
-        nodes = bindings.get("nodes")
-        edges = bindings.get("edges")
-        train = bindings.get("train")
-        if train.label_name is None:
-            raise AlgorithmConfigurationError("graph train binding requires labels")
-        if self.model_kind == "rgcn" and len(edges.feature_names) != 3:
             raise AlgorithmConfigurationError(
-                "R-GCN edge binding requires source, destination, and relation"
+                "graph Stage input bindings have an invalid typed layout"
             )
-        collector_type = ray.remote(_EvidenceCollector).options(num_cpus=0)
-        self._collector = collector_type.remote()
-        return TorchTrainer(
-            train_loop_per_worker=_graph_train_loop,
-            train_loop_config={
-                "binding_digest": self.plan.primary_input_descriptor.binding_digest,
-                "columns": {
-                    "node_id": nodes.feature_names[0],
-                    "node_features": list(nodes.feature_names[1:]),
-                    "edge_source": edges.feature_names[0],
-                    "edge_destination": edges.feature_names[1],
-                    **(
-                        {"edge_relation": edges.feature_names[2]}
-                        if self.model_kind == "rgcn"
-                        else {}
-                    ),
-                    "seed_node_id": train.feature_names[0],
-                    "seed_label": train.label_name,
-                },
-                "evidence_actor": self._collector,
-                "model_kind": self.model_kind,
-                "model": model_config,
-                "training": training_config,
-            },
-            scaling_config=_scaling_config(self.plan),
-            datasets=cast(dict[str, Any], dict(datasets)),
-            dataset_config=DataConfig(datasets_to_split=["train"]),
-            run_config=RunConfig(
-                name=f"tributo-{self.model_kind}",
-                storage_path=ray_config.get("storage_path"),
-            ),
-        )
+        columns: dict[str, object] = {
+            "node_id": str(node_features[0]),
+            "node_features": [str(name) for name in node_features[1:]],
+            "edge_source": str(edge_features[0]),
+            "edge_destination": str(edge_features[1]),
+            "seed_node_id": str(train_features[0]),
+            "seed_label": label_name,
+        }
+        if len(edge_features) >= 3:
+            columns["edge_relation"] = str(edge_features[2])
+        config["columns"] = columns
+        return config
 
-    def collect_evidence(self, result: object) -> Mapping[str, Any]:
-        import ray
+    def train_loop_per_worker(
+        self,
+        worker_config: Mapping[str, object],
+        checkpoint_context: TorchWorkerCheckpointContext,
+    ) -> None:
+        _graph_train_loop(worker_config, checkpoint_context)
 
-        del result
-        if self._collector is None:
-            raise AlgorithmExecutionError("graph evidence collector is missing")
-        workers = ray.get(self._collector.snapshot.remote())
-        ray.kill(self._collector, no_restart=True)
-        self._collector = None
-        if len(workers) != self.plan.runtime.worker_count:
-            raise AlgorithmExecutionError("graph training did not report every worker")
-        model_digests = {str(item.get("model_state_digest")) for item in workers}
-        topology_digests = {str(item.get("topology_digest")) for item in workers}
-        node_feature_digests = {
-            str(item.get("node_feature_digest")) for item in workers
-        }
-        graph_identity_digests = {
-            str(item.get("graph_identity_digest")) for item in workers
-        }
-        inference_logits_digests = {
-            str(item.get("inference_logits_digest")) for item in workers
-        }
-        topology_kinds = {str(item.get("topology_kind")) for item in workers}
-        if (
-            len(model_digests) != 1
-            or len(topology_digests) != 1
-            or len(node_feature_digests) != 1
-            or len(graph_identity_digests) != 1
-            or len(inference_logits_digests) != 1
-            or len(topology_kinds) != 1
-        ):
-            raise AlgorithmExecutionError(
-                "GraphSAGE workers did not share model and topology state"
-            )
-        return {
-            "workers": workers,
-            "state": {
-                "coordination": "framework_native",
-                "synchronized": True,
-                "bounded": True,
-                "global_model_digest": next(iter(model_digests)),
-                "details": {
-                    "framework": "pytorch-geometric",
-                    "sampling": "full_neighborhood",
-                    "topology_kind": next(iter(topology_kinds)),
-                    "topology_digest": next(iter(topology_digests)),
-                    "node_feature_digest": next(iter(node_feature_digests)),
-                    "graph_identity_digest": next(iter(graph_identity_digests)),
-                    "inference_logits_digest": next(iter(inference_logits_digests)),
-                },
-            },
-            "input_complete": True,
-        }
-
-    def checkpoint_source(self, result: object) -> object:
+    def checkpoint_source(
+        self, result: object, context: TorchCheckpointContext
+    ) -> object:
+        del context
         checkpoint = getattr(result, "checkpoint", None)
         if checkpoint is None:
             raise AlgorithmExecutionError("graph training result has no checkpoint")
         return checkpoint
 
+    def metric_plan(self, context: TorchRuntimeContext) -> Any:
+        del context
+        from tributo.algorithms.spi import TorchMetricPlan
 
-@PublicAPI(stability="alpha")
-class DistributedRGCN(DistributedGraphSAGE):
-    """Train a relation-aware static graph through PyG RGCNConv and DDP."""
+        return TorchMetricPlan({"train_loss": "sum_count", "accuracy": "sum_count"})
 
-    model_kind = "rgcn"
-
-
-@PublicAPI(stability="alpha")
-def create_algorithm(
-    *,
-    plan: ResolvedAlgorithmPlan,
-    implementation: object,
-    artifacts: tuple[object, ...],
-) -> FrameworkNativeAlgorithm:
-    del artifacts
-    if implementation is DistributedGraphSAGE:
-        return DistributedGraphSAGE(plan)
-    if implementation is DistributedRGCN:
-        return DistributedRGCN(plan)
-    raise AlgorithmConfigurationError("graph implementation drifted")
-
-
-@PublicAPI(stability="alpha")
-def export_result(
-    *,
-    result: object,
-    checkpoint: object,
-    plan: ResolvedAlgorithmPlan,
-    run_id: str,
-) -> AlgorithmExecutionResult:
-    import importlib.metadata
-
-    import torch
-    import torch_geometric
-    from tributo.exporting.models import (
-        BundleOutputConfig,
-        CheckpointField,
-        ExportCheckpointV1,
-        ExportSource,
-        ExportTarget,
-    )
-    from tributo.exporting.service import BundleExportService
-
-    output = plan.algorithm_config.get("output")
-    if not isinstance(output, Mapping) or not isinstance(output.get("bundle_uri"), str):
-        raise AlgorithmConfigurationError("graph training requires output.bundle_uri")
-    as_directory = getattr(checkpoint, "as_directory", None)
-    if not callable(as_directory):
-        raise AlgorithmExecutionError("graph checkpoint is not readable")
-    with as_directory() as directory:
-        root = Path(directory)
-        model_config = json.loads(
-            (root / "model_config.json").read_text(encoding="utf-8")
+    def artifact_plan(self, context: TorchArtifactContext) -> TorchArtifactPlan:
+        config = context.stage.runtime.algorithm_config.get("model", {})
+        classes = (
+            int(config.get("num_classes", 2)) if isinstance(config, Mapping) else 2
         )
-        model = cast(
-            torch.nn.Module,
-            _build_model(
-                int(model_config["input_features"]),
-                int(model_config["hidden_features"]),
-                int(model_config["num_classes"]),
-                model_kind=str(model_config.get("model_kind", "graphsage")),
-                num_relations=int(model_config.get("num_relations", 1)),
-            ),
-        )
-        state = torch.load(root / "model.pt", map_location="cpu", weights_only=True)
-        model.load_state_dict(state)
-        model.eval()
-        inference_logits = torch.load(
-            root / "inference_logits.pt",
-            map_location="cpu",
-            weights_only=True,
-        )
-        if not isinstance(inference_logits, torch.Tensor) or inference_logits.ndim != 2:
-            raise AlgorithmExecutionError("graph inference logits are malformed")
-        if inference_logits.shape[0] < 1:
-            raise AlgorithmExecutionError("graph inference logits must not be empty")
-        num_classes = int(model_config["num_classes"])
-        if inference_logits.shape[1] != num_classes or not bool(
-            torch.isfinite(inference_logits).all()
-        ):
-            raise AlgorithmExecutionError(
-                "graph inference logits do not match the finite class contract"
-            )
-        graph_identity_version = model_config.get("graph_identity_version")
-        if (
-            not isinstance(graph_identity_version, int)
-            or isinstance(graph_identity_version, bool)
-            or graph_identity_version != 1
-        ):
-            raise AlgorithmExecutionError("graph identity version is unsupported")
-        topology_digest = _require_sha256(
-            model_config.get("topology_digest"), name="topology_digest"
-        )
-        node_feature_digest = _require_sha256(
-            model_config.get("node_feature_digest"), name="node_feature_digest"
-        )
-        graph_identity_digest = _require_sha256(
-            model_config.get("graph_identity_digest"), name="graph_identity_digest"
-        )
-        node_feature_names = model_config.get("node_features")
-        if not isinstance(node_feature_names, list) or not all(
-            isinstance(value, str) and value for value in node_feature_names
-        ):
-            raise AlgorithmExecutionError("graph checkpoint node features are invalid")
-        computed_graph_identity = _graph_identity_digest(
-            topology_digest=topology_digest,
-            node_feature_digest=node_feature_digest,
-            node_feature_names=tuple(node_feature_names),
-        )
-        if graph_identity_digest != computed_graph_identity:
-            raise AlgorithmExecutionError("graph identity digest mismatched")
-        expected_logits_digest = _require_sha256(
-            model_config.get("inference_logits_digest"),
-            name="inference_logits_digest",
-        )
-        actual_logits_digest = _tensor_digest(inference_logits)
-        if expected_logits_digest != actual_logits_digest:
-            raise AlgorithmExecutionError("graph inference logits digest mismatched")
-        bundle_model = cast(
-            torch.nn.Module,
-            _node_lookup_model(model, inference_logits),
-        )
-        model_digest = _state_digest(cast(Mapping[str, object], model.state_dict()))
-        fingerprint = _graph_source_fingerprint(
-            model_digest=model_digest,
-            graph_identity_digest=graph_identity_digest,
-            inference_logits_digest=actual_logits_digest,
-        )
-        source = ExportSource(
+        return TorchArtifactPlan(
             source_kind="torch_module",
-            model_object=bundle_model,
-            architecture_id=plan.resolution.implementation_id,
-            model_config_data=model_config,
-            feature_schema={
-                "input_names": ["node_id"],
-                "node_features": node_feature_names,
-                "node_id_min": 0,
-                "node_id_max_exclusive": int(inference_logits.shape[0]),
-                "graph_identity_version": 1,
-                "topology_digest": topology_digest,
-                "node_feature_digest": node_feature_digest,
-                "graph_identity_digest": graph_identity_digest,
-                "inference_logits_digest": actual_logits_digest,
-                "output_layout": {
-                    "logits": [0, int(model_config["num_classes"])],
-                    "valid": int(model_config["num_classes"]),
+            input_signature=(
+                {"name": "node_id", "dtype": "int64", "shape": ("batch",)},
+            ),
+            output_signature=(
+                {"name": "output", "dtype": "float32", "shape": ("batch", classes + 1)},
+            ),
+            targets=(
+                {
+                    "name": "graph-model",
+                    "format": "safetensors",
+                    "exporter_id": "torch-safetensors-v1",
                 },
-            },
-            sample_inputs={"node_id": torch.tensor([0, 1], dtype=torch.int64)},
-            metadata={
-                "framework": "pytorch-geometric",
-                "framework_versions": {
-                    "torch": torch.__version__,
-                    "torch-geometric": torch_geometric.__version__,
+                {
+                    "name": "graph-inference",
+                    "format": "onnx",
+                    "exporter_id": "torch-onnx-v1",
+                    "options": {"dynamo": False},
                 },
-                "task_type": "node_classification",
-                "sampling": "full_neighborhood",
-                "graph_identity_digest": graph_identity_digest,
-                "topology_kind": (
-                    "relational"
-                    if model_config.get("model_kind") == "rgcn"
-                    else "homogeneous"
+            ),
+            roles={"model": "graph-model", "inference": "graph-inference"},
+        )
+
+    @contextmanager
+    def open_export_source(
+        self, checkpoint_ref: TorchCheckpointRef, artifact_context: TorchArtifactContext
+    ) -> Any:
+        import torch
+        import torch_geometric
+        from tributo.exporting.models import (
+            CheckpointField,
+            ExportCheckpointV1,
+            ExportSource,
+        )
+
+        checkpoint = checkpoint_ref.checkpoint
+        opener = getattr(checkpoint, "as_directory", None)
+        if not callable(opener):
+            raise AlgorithmExecutionError("graph checkpoint cannot be opened")
+        with opener() as directory:
+            root = Path(directory)
+            required_payloads = (
+                "model_config.json",
+                "model.pt",
+                "inference_logits.pt",
+            )
+            missing_payloads = [
+                name
+                for name in required_payloads
+                if not (root / name).is_file() or (root / name).is_symlink()
+            ]
+            if missing_payloads:
+                raise AlgorithmExecutionError(
+                    f"graph checkpoint is missing payloads: {missing_payloads}"
+                )
+            model_config = json.loads(
+                (root / "model_config.json").read_text(encoding="utf-8")
+            )
+            model = cast(
+                torch.nn.Module,
+                _build_model(
+                    int(model_config["input_features"]),
+                    int(model_config["hidden_features"]),
+                    int(model_config["num_classes"]),
+                    model_kind=str(model_config.get("model_kind", self.model_kind)),
+                    num_relations=int(model_config.get("num_relations", 1)),
                 ),
-                "producer_distribution": "tributo-algorithms-graph-pyg",
-            },
-            source_fingerprint=fingerprint,
-            checkpoint_contract=ExportCheckpointV1(
-                trainer_type=str(model_config.get("model_kind", "graphsage")),
-                architecture_id=plan.resolution.implementation_id,
-                input_schema=(
-                    CheckpointField(
-                        name="node_id",
-                        dtype="int64",
-                        shape=("batch",),
-                    ),
-                ),
-                output_schema=(
-                    CheckpointField(
-                        name="output",
-                        dtype="float32",
-                        shape=("batch", int(model_config["num_classes"]) + 1),
-                    ),
-                ),
-                preprocessing={
-                    "type": "transductive_node_lookup",
-                    "invalid_id_policy": "zero_output_with_valid_false",
-                    "node_count": int(inference_logits.shape[0]),
+            )
+            try:
+                model.load_state_dict(
+                    torch.load(root / "model.pt", map_location="cpu", weights_only=True)
+                )
+            except (RuntimeError, TypeError, ValueError) as exc:
+                raise AlgorithmExecutionError(
+                    "graph model payload is incompatible"
+                ) from exc
+            model.eval()
+            inference_logits = torch.load(
+                root / "inference_logits.pt", map_location="cpu", weights_only=True
+            )
+            if (
+                not isinstance(inference_logits, torch.Tensor)
+                or inference_logits.ndim != 2
+                or inference_logits.shape[0] < 1
+                or inference_logits.shape[1] != int(model_config["num_classes"])
+                or not bool(torch.isfinite(inference_logits).all())
+            ):
+                raise AlgorithmExecutionError(
+                    "graph inference logits do not match the finite class contract"
+                )
+            if model_config.get("graph_identity_version") != 1:
+                raise AlgorithmExecutionError("graph identity version is unsupported")
+            topology_digest = _require_sha256(
+                model_config.get("topology_digest"), name="topology_digest"
+            )
+            node_feature_digest = _require_sha256(
+                model_config.get("node_feature_digest"), name="node_feature_digest"
+            )
+            graph_identity_digest = _require_sha256(
+                model_config.get("graph_identity_digest"), name="graph_identity_digest"
+            )
+            node_feature_names = model_config.get("node_features")
+            if not isinstance(node_feature_names, list) or not all(
+                isinstance(value, str) and value for value in node_feature_names
+            ):
+                raise AlgorithmExecutionError(
+                    "graph checkpoint node features are invalid"
+                )
+            if graph_identity_digest != _graph_identity_digest(
+                topology_digest=topology_digest,
+                node_feature_digest=node_feature_digest,
+                node_feature_names=tuple(node_feature_names),
+            ):
+                raise AlgorithmExecutionError("graph identity digest mismatched")
+            expected_logits_digest = _require_sha256(
+                model_config.get("inference_logits_digest"),
+                name="inference_logits_digest",
+            )
+            actual_logits_digest = _tensor_digest(inference_logits)
+            if expected_logits_digest != actual_logits_digest:
+                raise AlgorithmExecutionError(
+                    "graph inference logits digest mismatched"
+                )
+            model_digest = _state_digest(cast(Mapping[str, object], model.state_dict()))
+            yield ExportSource(
+                source_kind="torch_module",
+                model_object=_node_lookup_model(model, inference_logits),
+                architecture_id=artifact_context.stage.runtime.implementation_id,
+                model_config_data=model_config,
+                feature_schema={
+                    "input_names": ["node_id"],
+                    "node_features": node_feature_names,
+                    "node_id_min": 0,
+                    "node_id_max_exclusive": int(inference_logits.shape[0]),
                     "graph_identity_version": 1,
                     "topology_digest": topology_digest,
                     "node_feature_digest": node_feature_digest,
                     "graph_identity_digest": graph_identity_digest,
                     "inference_logits_digest": actual_logits_digest,
+                    "output_layout": {
+                        "logits": [0, int(model_config["num_classes"])],
+                        "valid": int(model_config["num_classes"]),
+                    },
+                    "output_shape": ["batch", int(model_config["num_classes"]) + 1],
                 },
-                task_type="transductive_node_classification",
-                framework="pytorch-geometric",
-                framework_version=torch_geometric.__version__,
-            ),
-        )
-        published = BundleExportService().export_bundle(
-            source,
-            BundleOutputConfig(
-                bundle_uri=cast(str, output["bundle_uri"]),
-                request_id=run_id,
-                run_id=run_id,
-                targets=[
-                    ExportTarget(
-                        name="graph-model",
-                        format="safetensors",
-                        exporter_id="torch-safetensors-v1",
-                    ),
-                    ExportTarget(
-                        name="graph-inference",
-                        format="onnx",
-                        exporter_id="torch-onnx-v1",
-                        options={"dynamo": False},
-                    ),
-                ],
-                roles={
-                    "model": "graph-model",
-                    "inference": "graph-inference",
+                sample_inputs={"node_id": torch.tensor([0, 1], dtype=torch.int64)},
+                metadata={
+                    "framework": "pytorch-geometric",
+                    "framework_versions": {
+                        "torch": torch.__version__,
+                        "torch-geometric": torch_geometric.__version__,
+                    },
+                    "task_type": "node_classification",
+                    "sampling": "full_neighborhood",
+                    "graph_identity_digest": graph_identity_digest,
+                    "topology_kind": "relational"
+                    if self.model_kind == "rgcn"
+                    else "homogeneous",
+                    "producer_distribution": "tributo-algorithms-graph-pyg",
                 },
-            ),
-            tributo_version=importlib.metadata.version("tributo"),
-        )
-    metrics = getattr(result, "metrics", {})
-    return AlgorithmExecutionResult(
-        status="succeeded",
-        metrics={
-            key: value
-            for key, value in (metrics.items() if isinstance(metrics, Mapping) else ())
-            if isinstance(value, (str, int, float, bool, type(None)))
-        },
-        outputs={
-            "bundle_id": published.bundle_id,
-            "bundle_uri": published.canonical_uri,
-            "execution_id": published.execution_id,
-            "manifest_sha256": published.manifest_sha256,
-        },
-    )
+                source_fingerprint=_graph_source_fingerprint(
+                    model_digest=model_digest,
+                    graph_identity_digest=graph_identity_digest,
+                    inference_logits_digest=actual_logits_digest,
+                ),
+                checkpoint_contract=ExportCheckpointV1(
+                    trainer_type=str(model_config.get("model_kind", self.model_kind)),
+                    architecture_id=artifact_context.stage.runtime.implementation_id,
+                    input_schema=(
+                        CheckpointField(
+                            name="node_id", dtype="int64", shape=("batch",)
+                        ),
+                    ),
+                    output_schema=(
+                        CheckpointField(
+                            name="output",
+                            dtype="float32",
+                            shape=("batch", int(model_config["num_classes"]) + 1),
+                        ),
+                    ),
+                    preprocessing={
+                        "type": "transductive_node_lookup",
+                        "invalid_id_policy": "zero_output_with_valid_false",
+                        "node_count": int(inference_logits.shape[0]),
+                        "graph_identity_version": 1,
+                        "topology_digest": topology_digest,
+                        "node_feature_digest": node_feature_digest,
+                        "graph_identity_digest": graph_identity_digest,
+                        "inference_logits_digest": actual_logits_digest,
+                    },
+                    task_type="transductive_node_classification",
+                    framework="pytorch-geometric",
+                    framework_version=torch_geometric.__version__,
+                ),
+            )
 
 
-__all__ = [
-    "DistributedGraphSAGE",
-    "DistributedRGCN",
-    "create_algorithm",
-    "export_result",
-]
+@PublicAPI(stability="alpha")
+class DistributedRGCN(DistributedGraphSAGE):
+    """Train a relation-aware graph through PyG RGCNConv."""
+
+    model_kind = "rgcn"
+
+
+def create_algorithm(
+    *,
+    plan: object | None = None,
+    implementation: object | None = None,
+    artifacts: tuple[object, ...] = (),
+) -> RayTorchAdapter:
+    del plan, artifacts
+    if implementation is DistributedRGCN:
+        return DistributedRGCN()
+    if implementation is DistributedGraphSAGE:
+        return DistributedGraphSAGE()
+    raise AlgorithmConfigurationError("graph implementation drifted")
+
+
+__all__ = ["DistributedGraphSAGE", "DistributedRGCN", "create_algorithm"]

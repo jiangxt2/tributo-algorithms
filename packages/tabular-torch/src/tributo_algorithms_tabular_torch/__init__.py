@@ -9,6 +9,14 @@ from tributo_algorithms_tabular_torch.descriptor import DNN_DESCRIPTOR, PU_DESCR
 _LAZY_EXPORTS = {
     "DNNRecipe": ("tributo_algorithms_tabular_torch.recipe", "DNNRecipe"),
     "PURecipe": ("tributo_algorithms_tabular_torch.recipe", "PURecipe"),
+    "PUGlobalLossReducer": (
+        "tributo_algorithms_tabular_torch.pu_reducer",
+        "PUGlobalLossReducer",
+    ),
+    "PURiskReducerPlan": (
+        "tributo_algorithms_tabular_torch.pu_reducer",
+        "PURiskReducerPlan",
+    ),
     "estimate_class_prior": (
         "tributo_algorithms_tabular_torch.priors",
         "estimate_class_prior",
@@ -32,5 +40,7 @@ __all__ = [
     "DNNRecipe",
     "PU_DESCRIPTOR",
     "PURecipe",
+    "PUGlobalLossReducer",
+    "PURiskReducerPlan",
     "estimate_class_prior",
 ]

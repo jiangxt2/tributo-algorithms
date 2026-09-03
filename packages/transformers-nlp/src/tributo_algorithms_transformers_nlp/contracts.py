@@ -1,9 +1,14 @@
-"""Contracts for pre-tokenized Transformer classification."""
+"""Versioned contracts for the pre-tokenized Transformer classifier."""
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from typing import Any
+
+
+def _digest(name: str) -> str:
+    return hashlib.sha256(f"tributo.transformer.{name}.v2".encode()).hexdigest()
 
 
 class TransformerConfigValidator:
@@ -14,27 +19,35 @@ class TransformerConfigValidator:
         allowed = {"metrics", "model", "optimizer", "output", "ray", "training"}
         if unknown := sorted(set(value) - allowed):
             raise ValueError(f"unknown Transformer config keys: {unknown}")
-        if not isinstance(value.get("output"), Mapping):
-            raise ValueError("Transformer output config is required")
+        for name in allowed:
+            item = value.get(name)
+            if item is not None and not isinstance(item, Mapping):
+                raise ValueError(f"{name} must be a mapping")
+        if not isinstance(value.get("output"), Mapping) or not isinstance(
+            value["output"].get("bundle_uri"), str
+        ):
+            raise ValueError("Transformer output.bundle_uri is required")
         return dict(value)
 
 
-class TokenInputValidator:
+class TokenTensorInputValidator:
     api_version = 1
-    schema_digest = "e" * 64
+    schema_digest = _digest("tokens")
 
     def validate(self, value: Mapping[str, Any]) -> Mapping[str, Any]:
         bindings = value.get("bindings")
         if not isinstance(bindings, list) or len(bindings) != 1:
             raise ValueError("Transformer requires one train binding")
         binding = bindings[0]
-        if (
-            not isinstance(binding, Mapping)
-            or len(binding.get("feature_names", ())) < 2
-        ):
+        if not isinstance(binding, Mapping) or binding.get("role", "train") != "train":
+            raise ValueError("Transformer requires a train binding")
+        features = binding.get("feature_names")
+        if not isinstance(features, list) or not features:
             raise ValueError("Transformer requires ordered token columns")
-        if not binding.get("label_name"):
+        if not isinstance(binding.get("label_name"), str) or not binding["label_name"]:
             raise ValueError("Transformer classification requires a label")
+        if binding.get("sample_weight_name") is not None:
+            raise ValueError("Transformer does not support sample-weight binding")
         return value
 
 
@@ -46,14 +59,14 @@ class TransformerOutputValidator:
         outputs = value.get("outputs")
         if value.get("status") != "succeeded" or not isinstance(outputs, Mapping):
             raise ValueError("Transformer execution failed")
-        if not outputs.get("bundle_uri"):
+        if not isinstance(outputs.get("bundle_uri"), str) or not outputs["bundle_uri"]:
             raise ValueError("Transformer output requires Bundle")
         return value
 
 
-class TokenCoverageValidator:
+class TransformerTorchCoverageValidator:
     api_version = 1
-    schema_digest = "0" * 64
+    schema_digest = _digest("coverage")
 
     def validate(self, value: Mapping[str, Any]) -> Mapping[str, Any]:
         if (
@@ -65,8 +78,8 @@ class TokenCoverageValidator:
 
 
 __all__ = [
-    "TokenCoverageValidator",
-    "TokenInputValidator",
+    "TokenTensorInputValidator",
     "TransformerConfigValidator",
     "TransformerOutputValidator",
+    "TransformerTorchCoverageValidator",
 ]

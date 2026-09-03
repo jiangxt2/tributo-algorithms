@@ -1,21 +1,24 @@
-"""Tests for the official homogeneous PyG GraphSAGE algorithm."""
+"""Tests for GraphSAGE and R-GCN RayTorchAdapters."""
 
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
-from pathlib import Path
-from types import SimpleNamespace
-from typing import Any, cast
+from contextlib import contextmanager
 
-import numpy as np
 import pytest
 import torch
-from ray.train import Checkpoint
-from tributo.algorithms.api import AlgorithmExecutionError, DistributionStrategy
-from tributo.algorithms.spi import FrameworkNativeAlgorithm
-from tributo.exporting.bundle_reader import BundleReader
-from tributo.exporting.runtime import BundleModelLoader
+from tributo.algorithms import (
+    DistributionStrategy,
+    RayTorchAdapter,
+    TorchCheckpointRef,
+)
+from tributo.algorithms.api import AlgorithmExecutionError
+from tributo.algorithms.spi import (
+    TorchArtifactContext,
+    TorchRuntimeContext,
+    TorchStageContext,
+    TorchWorkerCheckpointContext,
+)
 from tributo_algorithms_graph_pyg import (
     GRAPHSAGE_DESCRIPTOR,
     RGCN_DESCRIPTOR,
@@ -26,392 +29,453 @@ from tributo_algorithms_graph_pyg.algorithm import (
     _build_model,
     _graph_identity_digest,
     _graph_source_fingerprint,
+    _load_checkpoint_state,
     _node_lookup_model,
-    _scaling_config,
     _state_digest,
     _tensor_digest,
-    export_result,
 )
 from tributo_algorithms_graph_pyg.contracts import (
-    GraphCoverageValidator,
-    HomogeneousGraphInputValidator,
-    RelationalGraphCoverageValidator,
-    RelationalGraphInputValidator,
+    GraphConfigValidator,
+    GraphOutputValidator,
+    GraphSAGETorchCoverageValidator,
+    GraphSAGETorchInputValidator,
+    RelationalGraphConfigValidator,
+    RGCNTorchCoverageValidator,
+    RGCNTorchInputValidator,
 )
 
 
-def test_graphsage_descriptor_uses_framework_native_contract() -> None:
-    registration = GRAPHSAGE_DESCRIPTOR.registration
+def test_graph_descriptors_use_ray_torch_adapter_and_budgets() -> None:
+    for descriptor in (GRAPHSAGE_DESCRIPTOR, RGCN_DESCRIPTOR):
+        registration = descriptor.registration
+        assert (
+            registration.distribution_spec.strategy
+            is DistributionStrategy.RAY_TRAIN_TORCH
+        )
+        policy = registration.distribution_spec.policy
+        assert policy.loop_owner == "adapter"
+        assert policy.max_replicated_bytes_per_worker == 536_870_912
+        assert all(
+            route.mode in {"split_exact", "replicate"}
+            for route in policy.dataset_routing
+        )
 
-    assert GRAPHSAGE_DESCRIPTOR.api_version == 2
-    assert issubclass(DistributedGraphSAGE, FrameworkNativeAlgorithm)
-    assert registration.contract_bindings is not None
-    assert registration.distribution_spec is not None
-    assert (
-        registration.distribution_spec.strategy is DistributionStrategy.FRAMEWORK_NATIVE
+
+def test_graph_adapters_implement_public_contract() -> None:
+    assert issubclass(DistributedGraphSAGE, RayTorchAdapter)
+    assert issubclass(DistributedRGCN, RayTorchAdapter)
+    assert DistributedGraphSAGE().model_kind == "graphsage"
+    assert DistributedRGCN().model_kind == "rgcn"
+
+
+@pytest.mark.parametrize("adapter", [DistributedGraphSAGE(), DistributedRGCN()])
+def test_graph_artifact_plan_declares_targets_roles_and_signature(adapter) -> None:
+    runtime = TorchRuntimeContext(
+        {"model": {"num_classes": 3}},
+        "example.graph",
+        1,
+        "a" * 64,
+        "b" * 64,
     )
-    assert registration.implementation.runtime_id == "tributo.framework_native"
-
-
-def test_rgcn_descriptor_uses_framework_native_contract() -> None:
-    registration = RGCN_DESCRIPTOR.registration
-    assert issubclass(DistributedRGCN, DistributedGraphSAGE)
-    assert registration.contract_bindings is not None
-    assert registration.distribution_spec is not None
-    assert (
-        registration.distribution_spec.strategy is DistributionStrategy.FRAMEWORK_NATIVE
+    stage = TorchStageContext(runtime, "train", 0, True, ("train",))
+    plan = adapter.artifact_plan(TorchArtifactContext(stage))
+    assert plan.source_kind == "torch_module"
+    assert plan.input_signature == (
+        {"name": "node_id", "dtype": "int64", "shape": ("batch",)},
     )
-
-
-def test_graph_scaling_config_spreads_workers() -> None:
-    plan = cast(
-        Any,
-        SimpleNamespace(
-            runtime=SimpleNamespace(
-                worker_count=2,
-                num_cpus=1.0,
-                num_gpus=0.0,
-                custom_resources={"graph": 0.25},
-            )
-        ),
+    assert plan.output_signature == (
+        {"name": "output", "dtype": "float32", "shape": ("batch", 4)},
     )
-    scaling = cast(Any, _scaling_config(plan))
-    assert scaling.num_workers == 2
-    assert scaling.placement_strategy == "SPREAD"
-    assert scaling.resources_per_worker == {"CPU": 1.0, "GPU": 0.0, "graph": 0.25}
+    assert tuple(target["name"] for target in plan.targets) == (
+        "graph-model",
+        "graph-inference",
+    )
+    assert tuple(target["format"] for target in plan.targets) == (
+        "safetensors",
+        "onnx",
+    )
+    assert plan.roles == {"model": "graph-model", "inference": "graph-inference"}
 
 
-def test_graph_input_contract_requires_nodes_edges_and_seed_labels() -> None:
-    value = {
-        "primary_role": "train",
-        "bindings": [
-            {
-                "name": "nodes",
-                "feature_names": ["node_id", "feature_0", "feature_1"],
-                "label_name": None,
-            },
-            {
-                "name": "edges",
-                "feature_names": ["source", "destination"],
-                "label_name": None,
-            },
-            {
-                "name": "train",
-                "feature_names": ["node_id"],
-                "label_name": "label",
-            },
-        ],
-        "descriptors": {"nodes": {}, "edges": {}, "train": {}},
+def test_graph_worker_config_is_derived_from_typed_bindings() -> None:
+    runtime = TorchRuntimeContext(
+        algorithm_config={"model": {}, "ray": {"storage_path": "/hidden"}},
+        implementation_id="tributo.official.graph_pyg.graphsage",
+        world_size=2,
+        policy_digest="a" * 64,
+        execution_plan_digest="b" * 64,
+        input_bindings={
+            "nodes": {"feature_names": ["node_id", "f0", "f1"]},
+            "edges": {"feature_names": ["source", "destination"]},
+            "train": {"feature_names": ["seed_id"], "label_name": "label"},
+        },
+    )
+    context = TorchStageContext(runtime, "train", 0, True, ("train", "nodes", "edges"))
+    config = DistributedGraphSAGE().worker_config(context)
+    assert "ray" not in config
+    assert config["columns"] == {
+        "node_id": "node_id",
+        "node_features": ["f0", "f1"],
+        "edge_source": "source",
+        "edge_destination": "destination",
+        "seed_node_id": "seed_id",
+        "seed_label": "label",
     }
 
-    assert HomogeneousGraphInputValidator().validate(value) == value
+
+def test_graph_models_run_on_homogeneous_and_relational_graphs() -> None:
+    features = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 0]], dtype=torch.long)
+    assert _build_model(2, 4, 2)(features, edge_index).shape == (3, 2)
+    relational = _build_model(2, 4, 2, model_kind="rgcn", num_relations=2)
+    edge_type = torch.tensor([0, 1, 0], dtype=torch.long)
+    assert relational(features, edge_index, edge_type).shape == (3, 2)
 
 
-def test_graphsage_model_runs_on_homogeneous_graph() -> None:
-    model = _build_model(input_features=2, hidden_features=4, num_classes=2)
-    features = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [0.5, 0.5]])
-    edge_index = torch.tensor(
-        [[0, 1, 2, 3, 1, 2], [1, 2, 3, 0, 0, 1]], dtype=torch.long
-    )
-
-    output = model(features, edge_index)
-
-    assert output.shape == (4, 2)
-
-
-def test_graph_lookup_returns_validity_without_negative_index_wraparound() -> None:
-    model = _build_model(input_features=2, hidden_features=4, num_classes=2)
+def test_graph_lookup_marks_invalid_node_ids_without_wraparound() -> None:
+    model = _build_model(2, 4, 2)
     logits = torch.tensor([[1.0, -1.0], [0.5, 0.25], [-0.5, 2.0]])
-    lookup = cast(Any, _node_lookup_model(model, logits))
+    lookup = _node_lookup_model(model, logits)
     output = lookup(torch.tensor([-1, 2, 3], dtype=torch.int64))
-    assert tuple(lookup.state_dict()) == tuple(cast(Any, model).state_dict())
+    assert output.shape == (3, 3)
     torch.testing.assert_close(output[1, :2], logits[2])
     torch.testing.assert_close(output[[0, 2], :2], torch.zeros((2, 2)))
     torch.testing.assert_close(output[:, 2], torch.tensor([0.0, 1.0, 0.0]))
 
 
-def _export_graph_checkpoint(
-    tmp_path: Path,
-    *,
-    model_config_updates: Mapping[str, object] | None = None,
-    removed_config_keys: tuple[str, ...] = (),
-    inference_logits: object | None = None,
-) -> None:
-    checkpoint_root = tmp_path / "checkpoint"
-    checkpoint_root.mkdir()
-    model = cast(torch.nn.Module, _build_model(2, 4, 2))
-    torch.save(model.state_dict(), checkpoint_root / "model.pt")
-    logits = (
-        torch.tensor([[1.0, -1.0], [0.5, 0.25], [-0.5, 2.0]])
-        if inference_logits is None
-        else inference_logits
+def test_graph_identity_and_source_fingerprint_bind_all_state() -> None:
+    topology = "a" * 64
+    features = "b" * 64
+    identity = _graph_identity_digest(
+        topology_digest=topology,
+        node_feature_digest=features,
+        node_feature_names=("f0", "f1"),
     )
-    torch.save(logits, checkpoint_root / "inference_logits.pt")
-    topology_digest = "a" * 64
-    node_feature_digest = "b" * 64
-    config: dict[str, object] = {
-        "input_features": 2,
-        "hidden_features": 4,
-        "num_classes": 2,
-        "node_features": ["f0", "f1"],
-        "model_kind": "graphsage",
-        "num_relations": 1,
-        "graph_identity_version": 1,
-        "topology_digest": topology_digest,
-        "node_feature_digest": node_feature_digest,
-        "graph_identity_digest": _graph_identity_digest(
-            topology_digest=topology_digest,
-            node_feature_digest=node_feature_digest,
-            node_feature_names=("f0", "f1"),
-        ),
-        "inference_logits_digest": (
-            _tensor_digest(logits) if isinstance(logits, torch.Tensor) else "c" * 64
-        ),
+    fingerprint = _graph_source_fingerprint(
+        model_digest="c" * 64,
+        graph_identity_digest=identity,
+        inference_logits_digest="d" * 64,
+    )
+    assert len(identity) == len(fingerprint) == 64
+    assert _tensor_digest(torch.ones((2, 2))) != _tensor_digest(torch.zeros((2, 2)))
+    assert len(_state_digest(_build_model(2, 4, 2).state_dict())) == 64
+
+
+def test_graph_contracts_require_all_roles_and_evidence() -> None:
+    value = {
+        "primary_role": "train",
+        "bindings": [
+            {"name": "nodes", "feature_names": ["node_id", "f0", "f1"]},
+            {"name": "edges", "feature_names": ["source", "destination"]},
+            {"name": "train", "feature_names": ["node_id"], "label_name": "label"},
+        ],
+        "descriptors": {"nodes": {}, "edges": {}, "train": {}},
     }
-    if model_config_updates is not None:
-        config.update(model_config_updates)
-    for key in removed_config_keys:
-        config.pop(key)
-    (checkpoint_root / "model_config.json").write_text(
-        json.dumps(config),
-        encoding="utf-8",
+    assert GraphSAGETorchInputValidator().validate(value) == value
+    assert RGCNTorchInputValidator().validate(
+        {
+            **value,
+            "bindings": [
+                value["bindings"][0],
+                {
+                    "name": "edges",
+                    "feature_names": ["source", "destination", "relation"],
+                },
+                value["bindings"][2],
+            ],
+        }
     )
-    export_result(
-        result=SimpleNamespace(metrics={"loss": 0.1}),
-        checkpoint=Checkpoint.from_directory(str(checkpoint_root)),
-        plan=cast(
-            Any,
-            SimpleNamespace(
-                algorithm_config={"output": {"bundle_uri": str(tmp_path / "bundle")}},
-                resolution=SimpleNamespace(
-                    implementation_id="tributo.official.graph_pyg.graphsage"
-                ),
-            ),
-        ),
-        run_id="graph-export-invalid-checkpoint-test",
+    evidence = {
+        "input_complete": True,
+        "distributed": True,
+        "workers": [{"input_rows": {"train": 1, "nodes": 2, "edges": 2}}],
+        "state": {
+            "details": {"sampling": "full_neighborhood", "topology_kind": "homogeneous"}
+        },
+    }
+    assert GraphSAGETorchCoverageValidator().validate(evidence) == evidence
+    assert RGCNTorchCoverageValidator().validate(
+        {
+            **evidence,
+            "state": {
+                "details": {
+                    "sampling": "full_neighborhood",
+                    "topology_kind": "relational",
+                }
+            },
+        }
     )
 
 
-@pytest.mark.parametrize("version", [True, 1.0, "1", None])
-def test_graph_export_rejects_non_integer_identity_version(
-    tmp_path: Path,
-    version: object,
-) -> None:
-    with pytest.raises(
-        AlgorithmExecutionError, match="identity version is unsupported"
-    ):
-        _export_graph_checkpoint(
-            tmp_path,
-            model_config_updates={"graph_identity_version": version},
-        )
+def test_graph_v2_inputs_reject_sample_weights() -> None:
+    value = {
+        "primary_role": "train",
+        "bindings": [
+            {"name": "nodes", "feature_names": ["node_id", "f0"]},
+            {
+                "name": "edges",
+                "feature_names": ["source", "destination"],
+                "sample_weight_name": "weight",
+            },
+            {"name": "train", "feature_names": ["node_id"], "label_name": "label"},
+        ],
+        "descriptors": {"nodes": {}, "edges": {}, "train": {}},
+    }
+    with pytest.raises(ValueError, match="sample-weight"):
+        GraphSAGETorchInputValidator().validate(value)
 
 
 @pytest.mark.parametrize(
-    ("model_config_updates", "removed_config_keys", "message"),
+    ("validator", "bindings"),
     [
-        ({"topology_digest": "invalid"}, (), "topology_digest is invalid"),
-        ({}, ("node_feature_digest",), "node_feature_digest is invalid"),
-        ({"graph_identity_digest": "c" * 64}, (), "identity digest mismatched"),
-        ({"inference_logits_digest": "d" * 64}, (), "logits digest mismatched"),
+        (
+            GraphSAGETorchInputValidator,
+            [
+                {"name": "nodes", "feature_names": ["node_id", "f0"]},
+                {"name": "edges", "feature_names": ["source", "destination"]},
+                {"name": "train", "feature_names": ["node_id"], "label_name": "label"},
+            ],
+        ),
+        (
+            RGCNTorchInputValidator,
+            [
+                {"name": "nodes", "feature_names": ["node_id", "f0"]},
+                {
+                    "name": "edges",
+                    "feature_names": ["source", "destination", "relation"],
+                },
+                {"name": "train", "feature_names": ["node_id"], "label_name": "label"},
+            ],
+        ),
     ],
 )
-def test_graph_export_rejects_corrupt_identity_metadata(
-    tmp_path: Path,
-    model_config_updates: Mapping[str, object],
-    removed_config_keys: tuple[str, ...],
-    message: str,
+def test_graph_inputs_reject_duplicate_or_non_mapping_bindings(
+    validator, bindings
 ) -> None:
-    with pytest.raises(AlgorithmExecutionError, match=message):
-        _export_graph_checkpoint(
-            tmp_path,
-            model_config_updates=model_config_updates,
-            removed_config_keys=removed_config_keys,
+    base = {
+        "primary_role": "train",
+        "bindings": bindings,
+        "descriptors": {"nodes": {}, "edges": {}, "train": {}},
+    }
+    for candidate in (
+        bindings + [bindings[0]],
+        bindings[:2] + ["not-a-binding"],
+    ):
+        value = dict(base)
+        value["bindings"] = candidate
+        with pytest.raises(ValueError, match="binding"):
+            validator().validate(value)
+
+
+@pytest.mark.parametrize(
+    ("validator", "model"),
+    [
+        (GraphConfigValidator, {}),
+        (RelationalGraphConfigValidator, {"num_relations": 1}),
+    ],
+)
+def test_graph_configs_reject_zero_epochs(validator, model) -> None:
+    with pytest.raises(ValueError, match="training.epochs"):
+        validator().validate(
+            {
+                "model": model,
+                "training": {"epochs": 0},
+                "output": {"bundle_uri": "/tmp/unused"},
+            }
         )
 
 
-@pytest.mark.parametrize("invalid_logits", ["wrong_class_width", "non_finite"])
-def test_graph_export_rejects_invalid_inference_logits(
-    tmp_path: Path,
-    invalid_logits: str,
-) -> None:
-    logits = (
-        torch.ones((3, 3))
-        if invalid_logits == "wrong_class_width"
-        else torch.tensor([[1.0, float("nan")], [0.0, 1.0]])
-    )
-    with pytest.raises(
-        AlgorithmExecutionError,
-        match="inference logits do not match the finite class contract",
+def test_graph_output_contract_rejects_failed_or_missing_bundle() -> None:
+    for value in (
+        {"status": "failed", "outputs": {"bundle_uri": "/tmp/model"}},
+        {"status": "succeeded", "outputs": {}},
     ):
-        _export_graph_checkpoint(tmp_path, inference_logits=logits)
+        with pytest.raises(ValueError):
+            GraphOutputValidator().validate(value)
 
 
-def test_graph_export_publishes_sanitized_transductive_inference(
-    tmp_path: Path,
+def test_graph_export_source_preserves_identity_and_checkpoint_contract(
+    tmp_path,
 ) -> None:
-    checkpoint_root = tmp_path / "checkpoint"
-    checkpoint_root.mkdir()
-    model = cast(torch.nn.Module, _build_model(2, 4, 2))
-    torch.save(model.state_dict(), checkpoint_root / "model.pt")
-    inference_logits = torch.tensor([[1.0, -1.0], [0.5, 0.25], [-0.5, 2.0]])
-    torch.save(inference_logits, checkpoint_root / "inference_logits.pt")
+    model = _build_model(2, 4, 2)
+    torch.save(model.state_dict(), tmp_path / "model.pt")
+    logits = torch.tensor([[1.0, -1.0], [0.5, 0.25]])
+    torch.save(logits, tmp_path / "inference_logits.pt")
     topology_digest = "a" * 64
     node_feature_digest = "b" * 64
+    node_features = ["f0", "f1"]
     graph_identity_digest = _graph_identity_digest(
         topology_digest=topology_digest,
         node_feature_digest=node_feature_digest,
-        node_feature_names=("f0", "f1"),
+        node_feature_names=tuple(node_features),
     )
-    inference_logits_digest = _tensor_digest(inference_logits)
-    (checkpoint_root / "model_config.json").write_text(
+    model_config_path = tmp_path / "model_config.json"
+    model_config_path.write_text(
         json.dumps(
             {
                 "input_features": 2,
                 "hidden_features": 4,
                 "num_classes": 2,
-                "node_features": ["f0", "f1"],
+                "node_features": node_features,
                 "model_kind": "graphsage",
                 "num_relations": 1,
                 "graph_identity_version": 1,
                 "topology_digest": topology_digest,
                 "node_feature_digest": node_feature_digest,
                 "graph_identity_digest": graph_identity_digest,
-                "inference_logits_digest": inference_logits_digest,
+                "inference_logits_digest": _tensor_digest(logits),
             }
         ),
         encoding="utf-8",
     )
-    execution = export_result(
-        result=SimpleNamespace(metrics={"loss": 0.1}),
-        checkpoint=Checkpoint.from_directory(str(checkpoint_root)),
-        plan=cast(
-            Any,
-            SimpleNamespace(
-                algorithm_config={"output": {"bundle_uri": str(tmp_path / "bundle")}},
-                resolution=SimpleNamespace(
-                    implementation_id="tributo.official.graph_pyg.graphsage"
+
+    class Checkpoint:
+        @contextmanager
+        def as_directory(self):
+            yield str(tmp_path)
+
+    runtime = TorchRuntimeContext(
+        {"model": {"num_classes": 2}}, "example.graph", 1, "c" * 64, "d" * 64
+    )
+    stage = TorchStageContext(runtime, "train", 0, True, ("train",))
+    ref = TorchCheckpointRef(Checkpoint())
+    context = TorchArtifactContext(stage, ref)
+    with DistributedGraphSAGE().open_export_source(ref, context) as source:
+        assert source.checkpoint_contract is not None
+        assert source.feature_schema["graph_identity_digest"] == graph_identity_digest
+        predictions = source.model_object(source.sample_inputs["node_id"])
+        assert predictions.shape == (2, 3)
+        torch.testing.assert_close(predictions[:, -1], torch.ones(2))
+
+    outside_model = tmp_path.parent / f"{tmp_path.name}-outside-model.pt"
+    outside_model.write_bytes(b"not-a-model")
+    (tmp_path / "model.pt").unlink()
+    (tmp_path / "model.pt").symlink_to(outside_model)
+    with pytest.raises(AlgorithmExecutionError, match="missing payloads"):
+        with DistributedGraphSAGE().open_export_source(ref, context):
+            pass
+    (tmp_path / "model.pt").unlink()
+    torch.save(model.state_dict(), tmp_path / "model.pt")
+
+    corrupted = json.loads(model_config_path.read_text(encoding="utf-8"))
+    corrupted["graph_identity_digest"] = "c" * 64
+    model_config_path.write_text(json.dumps(corrupted), encoding="utf-8")
+    with pytest.raises(AlgorithmExecutionError, match="identity digest mismatched"):
+        with DistributedGraphSAGE().open_export_source(ref, context):
+            pass
+
+
+def test_rgcn_export_source_preserves_typed_signature_and_inference(tmp_path) -> None:
+    model = _build_model(2, 4, 2, model_kind="rgcn", num_relations=2)
+    torch.save(model.state_dict(), tmp_path / "model.pt")
+    logits = torch.tensor([[1.0, -1.0], [0.5, 0.25]])
+    torch.save(logits, tmp_path / "inference_logits.pt")
+    node_features = ["f0", "f1"]
+    topology_digest = "a" * 64
+    node_feature_digest = "b" * 64
+    (tmp_path / "model_config.json").write_text(
+        json.dumps(
+            {
+                "input_features": 2,
+                "hidden_features": 4,
+                "num_classes": 2,
+                "node_features": node_features,
+                "model_kind": "rgcn",
+                "num_relations": 2,
+                "graph_identity_version": 1,
+                "topology_digest": topology_digest,
+                "node_feature_digest": node_feature_digest,
+                "graph_identity_digest": _graph_identity_digest(
+                    topology_digest=topology_digest,
+                    node_feature_digest=node_feature_digest,
+                    node_feature_names=tuple(node_features),
                 ),
-            ),
-        ),
-        run_id="graph-export-test",
-    )
-    bundle_uri = cast(str, execution.outputs["bundle_uri"])
-    manifest = BundleReader().read_manifest(bundle_uri)
-    assert manifest.source_info.source_fingerprint == _graph_source_fingerprint(
-        model_digest=_state_digest(cast(Mapping[str, object], model.state_dict())),
-        graph_identity_digest=graph_identity_digest,
-        inference_logits_digest=inference_logits_digest,
-    )
-    runtime = BundleModelLoader().open(
-        bundle_uri,
-        role="inference",
-        use_case="batch",
-    )
-    try:
-        outputs = runtime.predict(
-            {"node_id": np.asarray([0, 2, -1, 3], dtype=np.int64)}
-        )
-    finally:
-        runtime.close()
-    assert outputs["output"].shape == (4, 3)
-    np.testing.assert_array_equal(outputs["output"][:, 2], [1.0, 1.0, 0.0, 0.0])
-    np.testing.assert_allclose(outputs["output"][[2, 3], :2], 0.0)
-    config_paths = tuple(Path(bundle_uri).rglob("model_config.json"))
-    assert config_paths
-    for config_path in config_paths:
-        published_config = json.loads(config_path.read_text(encoding="utf-8"))
-        assert "node_values" not in published_config
-        assert "edge_index" not in published_config
-        assert "edge_type" not in published_config
-        assert published_config["graph_identity_version"] == 1
-        assert published_config["topology_digest"] == topology_digest
-        assert published_config["node_feature_digest"] == node_feature_digest
-        assert published_config["graph_identity_digest"] == graph_identity_digest
-        assert published_config["inference_logits_digest"] == inference_logits_digest
-
-
-def test_graph_source_fingerprint_includes_derived_logits() -> None:
-    first = _graph_source_fingerprint(
-        model_digest="a" * 64,
-        graph_identity_digest="b" * 64,
-        inference_logits_digest="c" * 64,
-    )
-    second = _graph_source_fingerprint(
-        model_digest="a" * 64,
-        graph_identity_digest="b" * 64,
-        inference_logits_digest="d" * 64,
-    )
-
-    assert first != second
-
-
-def test_rgcn_model_runs_on_relational_graph() -> None:
-    model = _build_model(
-        input_features=2,
-        hidden_features=4,
-        num_classes=2,
-        model_kind="rgcn",
-        num_relations=2,
-    )
-    features = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [0.5, 0.5]])
-    edge_index = torch.tensor([[0, 1, 2, 3], [1, 2, 3, 0]], dtype=torch.long)
-    edge_type = torch.tensor([0, 1, 0, 1], dtype=torch.long)
-    assert model(features, edge_index, edge_type).shape == (4, 2)
-
-
-def test_relational_contract_requires_relation_and_topology_evidence() -> None:
-    input_value = {
-        "primary_role": "train",
-        "bindings": [
-            {
-                "name": "nodes",
-                "feature_names": ["node_id", "f0", "f1"],
-                "label_name": None,
-            },
-            {
-                "name": "edges",
-                "feature_names": ["source", "destination", "relation"],
-                "label_name": None,
-            },
-            {
-                "name": "train",
-                "feature_names": ["node_id"],
-                "label_name": "label",
-            },
-        ],
-        "descriptors": {"nodes": {}, "edges": {}, "train": {}},
-    }
-    assert RelationalGraphInputValidator().validate(input_value) == input_value
-    coverage = {
-        "input_complete": True,
-        "distributed": True,
-        "workers": [
-            {"input_rows": {"train": 2, "nodes": 4, "edges": 4}},
-            {"input_rows": {"train": 2, "nodes": 4, "edges": 4}},
-        ],
-        "state": {
-            "details": {
-                "sampling": "full_neighborhood",
-                "topology_kind": "relational",
+                "inference_logits_digest": _tensor_digest(logits),
             }
-        },
+        ),
+        encoding="utf-8",
+    )
+
+    class Checkpoint:
+        @contextmanager
+        def as_directory(self):
+            yield str(tmp_path)
+
+    runtime = TorchRuntimeContext(
+        {"model": {"num_classes": 2}},
+        "example.rgcn",
+        1,
+        "c" * 64,
+        "d" * 64,
+    )
+    stage = TorchStageContext(runtime, "train", 0, True, ("train",))
+    ref = TorchCheckpointRef(Checkpoint())
+    context = TorchArtifactContext(stage, ref)
+    with DistributedRGCN().open_export_source(ref, context) as source:
+        assert source.checkpoint_contract is not None
+        assert source.checkpoint_contract.output_schema[0].shape == ("batch", 3)
+        predictions = source.model_object(source.sample_inputs["node_id"])
+        assert predictions.shape == (2, 3)
+
+
+def test_graph_checkpoint_source_requires_a_checkpoint() -> None:
+    with pytest.raises(AlgorithmExecutionError, match="no checkpoint"):
+        DistributedGraphSAGE().checkpoint_source(type("Result", (), {})(), object())
+
+
+def test_graph_retry_checkpoint_requires_optimizer_state(tmp_path) -> None:
+    class Checkpoint:
+        @contextmanager
+        def as_directory(self):
+            yield str(tmp_path)
+
+    runtime = TorchRuntimeContext({}, "example.graph", 1, "a" * 64, "b" * 64)
+    stage = TorchStageContext(runtime, "train", 0, True, ("train",))
+    context = TorchWorkerCheckpointContext(
+        stage, "ray_failure_retry", TorchCheckpointRef(Checkpoint())
+    )
+    model = _build_model(2, 4, 2)
+    optimizer = torch.optim.Adam(model.parameters())
+    torch.save(model.state_dict(), tmp_path / "model.pt")
+    with pytest.raises(AlgorithmExecutionError, match="model/optimizer state"):
+        _load_checkpoint_state(context, model, optimizer, rank=0)
+
+
+def test_graph_retry_checkpoint_restores_optimizer_and_rng_state(tmp_path) -> None:
+    class Checkpoint:
+        @contextmanager
+        def as_directory(self):
+            yield str(tmp_path)
+
+    runtime = TorchRuntimeContext({}, "example.graph", 1, "a" * 64, "b" * 64)
+    stage = TorchStageContext(runtime, "train", 0, True, ("train",))
+    context = TorchWorkerCheckpointContext(
+        stage, "ray_failure_retry", TorchCheckpointRef(Checkpoint())
+    )
+    torch.manual_seed(17)
+    saved_model = _build_model(2, 4, 2)
+    saved_optimizer = torch.optim.Adam(saved_model.parameters())
+    sum(parameter.square().sum() for parameter in saved_model.parameters()).backward()
+    saved_optimizer.step()
+    expected_state = {
+        name: value.detach().clone() for name, value in saved_model.state_dict().items()
     }
-    assert RelationalGraphCoverageValidator().validate(coverage) == coverage
+    expected_rng = torch.get_rng_state().clone()
+    torch.save(saved_model.state_dict(), tmp_path / "model.pt")
+    torch.save(saved_optimizer.state_dict(), tmp_path / "optimizer.pt")
+    torch.save({"states": [expected_rng.numpy().tobytes()]}, tmp_path / "rng_state.pt")
 
+    target_model = _build_model(2, 4, 2)
+    target_optimizer = torch.optim.Adam(target_model.parameters())
+    torch.manual_seed(99)
+    assert _load_checkpoint_state(context, target_model, target_optimizer, rank=0) == 0
+    for name, value in target_model.state_dict().items():
+        torch.testing.assert_close(value, expected_state[name])
+    assert target_optimizer.state_dict()["state"]
+    torch.testing.assert_close(torch.get_rng_state(), expected_rng)
 
-def test_graph_coverage_contract_requires_all_roles() -> None:
-    value = {
-        "input_complete": True,
-        "distributed": True,
-        "workers": [
-            {
-                "input_rows": {"train": 2, "nodes": 4, "edges": 6},
-            },
-            {
-                "input_rows": {"train": 2, "nodes": 4, "edges": 6},
-            },
-        ],
-        "state": {"details": {"sampling": "full_neighborhood"}},
-    }
-
-    assert GraphCoverageValidator().validate(value) == value
+    wrong_source = TorchWorkerCheckpointContext(
+        stage, "stage_dependency", TorchCheckpointRef(Checkpoint())
+    )
+    with pytest.raises(AlgorithmExecutionError, match="only Ray failure retry"):
+        _load_checkpoint_state(wrong_source, target_model, target_optimizer, rank=0)

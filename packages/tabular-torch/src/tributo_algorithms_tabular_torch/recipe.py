@@ -1,45 +1,89 @@
-"""TrainingRecipeV2 implementations for dense DNN and PU learning."""
+"""Typed TorchRecipe implementations for dense DNN and PU learning."""
 
 from __future__ import annotations
 
-import pickle
 from collections.abc import Mapping
 from typing import Any, cast
 
-from tributo.algorithms import (
-    MetricPlan,
-    OptimizationPlan,
-    TrainingRecipeV2,
-    TrainingStepResult,
+from tributo.algorithms.api.torch_runtime import (
+    TorchCompositeLossContribution,
+    TorchLossContribution,
+    TorchMetricContribution,
+)
+from tributo.algorithms.spi import (
+    TorchArtifactContext,
+    TorchArtifactPlan,
+    TorchBatch,
+    TorchBatchContext,
+    TorchBuildContext,
+    TorchMetricPlan,
+    TorchModuleSet,
+    TorchOptimizationPlan,
+    TorchRecipe,
+    TorchRuntimeContext,
+    TorchStepContext,
+    TorchStepResult,
 )
 
 
-class _CheckpointCodec:
-    def dumps(self, value: object) -> bytes:
-        return pickle.dumps(value, protocol=5)
-
-    def loads(self, payload: bytes) -> object:
-        return pickle.loads(payload)
+def _config(context: TorchRuntimeContext | TorchBuildContext) -> Mapping[str, Any]:
+    runtime = context if isinstance(context, TorchRuntimeContext) else context.runtime
+    return cast(Mapping[str, Any], runtime.algorithm_config)
 
 
-def _binary_accuracy(predictions: object, targets: object) -> object:
+def _feature_and_label_names(
+    batch: Mapping[str, object], context: TorchBatchContext
+) -> tuple[tuple[str, ...], str]:
+    label_name = context.label_name or ("label" if "label" in batch else None)
+    if label_name is None:
+        raise ValueError("tabular-torch training requires a label")
+    feature_names = context.feature_names or tuple(
+        name for name in batch if name not in {label_name, context.weight_name}
+    )
+    if not feature_names:
+        raise ValueError("tabular-torch requires at least one feature")
+    return tuple(feature_names), label_name
+
+
+def _dense_batch(batch: object, context: TorchBatchContext) -> TorchBatch:
     import torch
 
-    logits = cast(Any, predictions)
-    labels = cast(Any, targets)
-    predicted = (torch.sigmoid(logits) >= 0.5).to(dtype=labels.dtype)
-    return (predicted == labels).to(dtype=torch.float32).mean()
+    if not isinstance(batch, Mapping):
+        raise ValueError("tabular-torch batch must be columnar")
+    feature_names, label_name = _feature_and_label_names(batch, context)
+    if context.weight_name is not None:
+        raise ValueError("tabular-torch does not support sample-weight binding")
+    try:
+        features = torch.stack(
+            [
+                torch.as_tensor(batch[name], dtype=torch.float32)
+                for name in feature_names
+            ],
+            dim=1,
+        )
+        labels = torch.as_tensor(batch[label_name], dtype=torch.float32).reshape(-1, 1)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("tabular-torch batch columns are malformed") from exc
+    if not torch.isfinite(features).all() or not torch.isfinite(labels).all():
+        raise ValueError("tabular-torch features and labels must be finite")
+    if not bool(((labels == 0) | (labels == 1)).all()):
+        raise ValueError("tabular-torch labels must be 0 or 1")
+    rows = int(features.shape[0])
+    return TorchBatch(
+        keyword={"features": features},
+        targets=labels,
+        local_rows=rows,
+        coverage_counts={"train": rows},
+    )
 
 
-def _observed_positive_recall(predictions: object, targets: object) -> object:
+def _binary_metric(predictions: object, targets: object) -> TorchMetricContribution:
     import torch
 
-    logits = cast(Any, predictions)
-    labels = cast(Any, targets)
-    positive = labels == 1
-    if not bool(positive.any()):
-        return torch.zeros((), device=logits.device)
-    return (torch.sigmoid(logits[positive]) >= 0.5).to(torch.float32).mean()
+    logits = cast(torch.Tensor, predictions).reshape(-1)
+    labels = cast(torch.Tensor, targets).reshape(-1)
+    correct = (torch.sigmoid(logits) >= 0.5).eq(labels >= 0.5)
+    return TorchMetricContribution(float(correct.sum().item()), int(labels.numel()))
 
 
 def _model(config: Mapping[str, Any]) -> object:
@@ -62,227 +106,194 @@ def _model(config: Mapping[str, Any]) -> object:
     return torch.nn.Sequential(*layers)
 
 
-def _dense_batch(
-    batch: object,
-    *,
-    feature_names: tuple[str, ...],
-    label_name: str | None,
-    weight_name: str | None,
-) -> tuple[object, object, object | None, int]:
-    import torch
+class _BaseDenseRecipe(TorchRecipe):
+    """Shared typed hooks for dense binary classifiers."""
 
-    if not isinstance(batch, Mapping):
-        raise ValueError("tabular-torch batch must be columnar")
-    if label_name is None:
-        raise ValueError("tabular-torch training requires a label")
-    features = torch.stack(
-        [batch[name].to(dtype=torch.float32) for name in feature_names], dim=1
-    )
-    labels = batch[label_name].to(dtype=torch.float32).reshape(-1, 1)
-    weights = batch.get(weight_name) if weight_name is not None else None
-    return features, labels, weights, int(features.shape[0])
+    def adapt_batch(self, batch: object, context: TorchBatchContext) -> TorchBatch:
+        return _dense_batch(batch, context)
 
-
-class _PULoss:
-    """Lazy nnPU/uPU callable retaining the published risk semantics."""
-
-    def __init__(
-        self,
-        *,
-        class_prior: float,
-        beta: float,
-        gamma: float,
-        loss_type: str,
-    ) -> None:
-        if not 0 < class_prior < 1:
-            raise ValueError("PU class_prior must be in (0, 1)")
-        if beta < 0 or not 0 <= gamma <= 1 or loss_type not in {"nnpu", "upu"}:
-            raise ValueError("PU risk configuration is invalid")
-        self.class_prior = class_prior
-        self.beta = beta
-        self.gamma = gamma
-        self.loss_type = loss_type
-        self.last_local_counts = {"positive": 0, "unlabeled": 0}
-
-    def __call__(self, logits: object, labels: object) -> object:
-        import torch
-        import torch.distributed as dist
-
-        values = cast(Any, logits).reshape(-1)
-        expected = cast(Any, labels).reshape(-1)
-        positive = expected == 1
-        unlabeled = expected == 0
-        self.last_local_counts = {
-            "positive": int(positive.sum()),
-            "unlabeled": int(unlabeled.sum()),
-        }
-        if not bool(torch.all(positive | unlabeled)):
-            raise ValueError("PU labels must be 1 (positive) or 0 (unlabeled)")
-        positive_loss_sum = torch.nn.functional.softplus(-values[positive]).sum()
-        positive_as_negative_sum = torch.nn.functional.softplus(values[positive]).sum()
-        unlabeled_negative_sum = torch.nn.functional.softplus(values[unlabeled]).sum()
-        counts = torch.tensor(
-            [int(positive.sum()), int(unlabeled.sum())],
-            dtype=values.dtype,
-            device=values.device,
-        )
-        detached_sums = torch.stack(
-            (
-                positive_loss_sum.detach(),
-                positive_as_negative_sum.detach(),
-                unlabeled_negative_sum.detach(),
-            )
-        )
-        world_size = 1
-        if dist.is_initialized():
-            dist.all_reduce(counts, op=dist.ReduceOp.SUM)
-            dist.all_reduce(detached_sums, op=dist.ReduceOp.SUM)
-            world_size = dist.get_world_size()
-        if bool((counts <= 0).any()):
-            raise ValueError(
-                "each global PU step must contain positive and unlabeled examples"
-            )
-        scale = float(world_size)
-        positive_risk = scale * self.class_prior * positive_loss_sum / counts[0]
-        negative_risk = scale * (
-            unlabeled_negative_sum / counts[1]
-            - self.class_prior * positive_as_negative_sum / counts[0]
-        )
-        global_negative_risk = (
-            detached_sums[2] / counts[1]
-            - self.class_prior * detached_sums[1] / counts[0]
-        )
-        if self.loss_type == "nnpu" and bool(global_negative_risk < -self.beta):
-            return -self.gamma * negative_risk
-        return positive_risk + negative_risk
-
-
-class _BaseDenseRecipe(TrainingRecipeV2):
-    metric_name = "accuracy"
-
-    def batch_adapter(
-        self,
-        batch: object,
-        *,
-        feature_names: tuple[str, ...],
-        label_name: str | None,
-        weight_name: str | None,
-        config: Mapping[str, Any],
-    ) -> tuple[object, object, object | None, int]:
-        del config
-        return _dense_batch(
-            batch,
-            feature_names=feature_names,
-            label_name=label_name,
-            weight_name=weight_name,
-        )
-
-    def training_step(
-        self,
-        modules: Mapping[str, object],
-        features: object,
-        targets: object,
-        weights: object | None,
-        config: Mapping[str, Any],
-    ) -> TrainingStepResult:
-        del weights, config
-        model = cast(Any, modules["model"])
-        loss = cast(Any, modules["loss"])
-        predictions = model(features)
-        return TrainingStepResult(predictions, loss(predictions, targets))
-
-    def validation_step(
-        self,
-        modules: Mapping[str, object],
-        features: object,
-        targets: object,
-        weights: object | None,
-        config: Mapping[str, Any],
-    ) -> TrainingStepResult:
-        return self.training_step(modules, features, targets, weights, config)
-
-    def optimization_plan(
-        self,
-        model: object,
-        config: Mapping[str, Any],
-    ) -> OptimizationPlan:
+    def configure_optimizers(
+        self, modules: TorchModuleSet, context: TorchBuildContext
+    ) -> TorchOptimizationPlan:
         import torch
 
-        return OptimizationPlan(
+        config = _config(context)
+        optimizer_config = config.get("optimizer", {})
+        if not isinstance(optimizer_config, Mapping):
+            raise ValueError("optimizer config must be a mapping")
+        model = cast(torch.nn.Module, modules["model"])
+        return TorchOptimizationPlan(
             optimizer=torch.optim.Adam(
-                cast(Any, model).parameters(),
-                lr=float(config.get("learning_rate", 0.001)),
-                weight_decay=float(config.get("weight_decay", 0.0)),
+                model.parameters(),
+                lr=float(optimizer_config.get("learning_rate", 0.001)),
+                weight_decay=float(optimizer_config.get("weight_decay", 0.0)),
             ),
-            gradient_accumulation_steps=int(config.get("accumulation_steps", 1)),
-            max_gradient_norm=float(config.get("max_gradient_norm", 1.0)),
+            gradient_accumulation_steps=int(
+                optimizer_config.get("accumulation_steps", 1)
+            ),
+            max_gradient_norm=float(optimizer_config.get("max_gradient_norm", 1.0)),
         )
 
-    def checkpoint_codec(self) -> object:
-        return _CheckpointCodec()
+    def artifact_plan(self, context: TorchArtifactContext) -> TorchArtifactPlan:
+        config = _config(context.stage.runtime)
+        model_config = config.get("model", {})
+        input_features = (
+            int(model_config.get("input_features", 4))
+            if isinstance(model_config, Mapping)
+            else 4
+        )
+        return TorchArtifactPlan(
+            source_kind="torch_module",
+            input_signature=(
+                {
+                    "name": "features",
+                    "dtype": "float32",
+                    "shape": ("batch", input_features),
+                },
+            ),
+            output_signature=(
+                {"name": "output", "dtype": "float32", "shape": ("batch", 1)},
+            ),
+            targets=(
+                {
+                    "name": "onnx-model",
+                    "format": "onnx",
+                    "exporter_id": "torch-onnx-v1",
+                    "options": {"dynamo": False},
+                },
+            ),
+            roles={"inference": "onnx-model"},
+        )
 
 
 class DNNRecipe(_BaseDenseRecipe):
-    """Binary dense DNN classification without Ray control-plane code."""
+    """Binary dense DNN classification."""
 
-    def build_modules(self, config: Mapping[str, Any]) -> Mapping[str, object]:
+    def build_modules(self, context: TorchBuildContext) -> TorchModuleSet:
         import torch
 
+        config = _config(context)
         model_config = config.get("model", {})
         if not isinstance(model_config, Mapping):
             raise ValueError("model config must be a mapping")
-        return {"model": _model(model_config), "loss": torch.nn.BCEWithLogitsLoss()}
-
-    def metric_plan(self, config: Mapping[str, Any]) -> MetricPlan:
-        del config
-        return MetricPlan(factories={"accuracy": _binary_accuracy})
-
-
-class PURecipe(_BaseDenseRecipe):
-    """Neural nnPU/uPU classifier over positive and unlabeled labels."""
-
-    def build_modules(self, config: Mapping[str, Any]) -> Mapping[str, object]:
-        import torch
-
-        model_config = config.get("model", {})
-        loss_config = config.get("loss", {})
-        if not isinstance(model_config, Mapping) or not isinstance(
-            loss_config, Mapping
-        ):
-            raise ValueError("PU model and loss config must be mappings")
-        loss: object
-        if "class_prior" not in loss_config:
-            loss = torch.nn.BCEWithLogitsLoss()
-        else:
-            loss = _PULoss(
-                class_prior=float(loss_config["class_prior"]),
-                beta=float(loss_config.get("beta", 0.0)),
-                gamma=float(loss_config.get("gamma", 1.0)),
-                loss_type=str(loss_config.get("type", "nnpu")),
-            )
-        return {"model": _model(model_config), "loss": loss}
-
-    def metric_plan(self, config: Mapping[str, Any]) -> MetricPlan:
-        del config
-        return MetricPlan(
-            factories={"observed_positive_recall": _observed_positive_recall}
+        return TorchModuleSet(
+            {"model": _model(model_config), "loss": torch.nn.Identity()}
         )
 
     def training_step(
-        self,
-        modules: Mapping[str, object],
-        features: object,
-        targets: object,
-        weights: object | None,
-        config: Mapping[str, Any],
-    ) -> TrainingStepResult:
-        del weights, config
-        model = cast(Any, modules["model"])
-        loss = cast(Any, modules["loss"])
-        predictions = model(features)
-        value = loss(predictions, targets)
-        counts = getattr(loss, "last_local_counts", {})
-        return TrainingStepResult(predictions, value, coverage_counts=counts)
+        self, modules: TorchModuleSet, batch: TorchBatch, context: TorchStepContext
+    ) -> TorchStepResult:
+        del context
+        import torch
+
+        model = cast(torch.nn.Module, modules["model"])
+        predictions = model(batch.keyword["features"])
+        targets = cast(torch.Tensor, batch.targets)
+        numerator = torch.nn.functional.binary_cross_entropy_with_logits(
+            predictions, targets, reduction="sum"
+        )
+        return TorchStepResult(
+            outputs={"output": predictions},
+            loss=TorchLossContribution(numerator, batch.local_rows),
+            coverage_counts=dict(batch.coverage_counts),
+            metrics={"accuracy": _binary_metric(predictions, targets)},
+        )
+
+    def validation_step(
+        self, modules: TorchModuleSet, batch: TorchBatch, context: TorchStepContext
+    ) -> TorchStepResult:
+        return self.training_step(modules, batch, context)
+
+    def metric_plan(self, context: TorchRuntimeContext) -> TorchMetricPlan:
+        del context
+        return TorchMetricPlan({"accuracy": "sum_count", "train_loss": "sum_count"})
+
+
+class PURecipe(_BaseDenseRecipe):
+    """Positive-unlabeled classifier using the Wheel-owned global reducer."""
+
+    component_schema_id = "tributo.official.tabular_torch.pu-risk-components.v1"
+
+    def build_modules(self, context: TorchBuildContext) -> TorchModuleSet:
+        import torch
+
+        config = _config(context)
+        model_config = config.get("model", {})
+        if not isinstance(model_config, Mapping):
+            raise ValueError("model config must be a mapping")
+        return TorchModuleSet(
+            {"model": _model(model_config), "loss": torch.nn.Identity()}
+        )
+
+    def configure_optimizers(
+        self, modules: TorchModuleSet, context: TorchBuildContext
+    ) -> TorchOptimizationPlan:
+        plan = super().configure_optimizers(modules, context)
+        if plan.gradient_accumulation_steps != 1:
+            raise ValueError("PU requires gradient_accumulation_steps=1")
+        return plan
+
+    def training_step(
+        self, modules: TorchModuleSet, batch: TorchBatch, context: TorchStepContext
+    ) -> TorchStepResult:
+        del context
+        import torch
+
+        model = cast(torch.nn.Module, modules["model"])
+        predictions = model(batch.keyword["features"]).reshape(-1)
+        labels = cast(torch.Tensor, batch.targets).reshape(-1)
+        positive = labels == 1
+        unlabeled = labels == 0
+        positive_loss = torch.nn.functional.softplus(-predictions[positive]).sum()
+        positive_as_negative = torch.nn.functional.softplus(predictions[positive]).sum()
+        unlabeled_negative = torch.nn.functional.softplus(predictions[unlabeled]).sum()
+        positive_count = int(positive.sum().item())
+        unlabeled_count = int(unlabeled.sum().item())
+        metrics = {
+            "observed_positive_recall": TorchMetricContribution(
+                float((torch.sigmoid(predictions[positive]) >= 0.5).sum().item()),
+                positive_count,
+            )
+        }
+        return TorchStepResult(
+            outputs={"output": predictions.reshape(-1, 1)},
+            loss=TorchCompositeLossContribution(
+                self.component_schema_id,
+                {
+                    "positive_loss_sum": positive_loss,
+                    "positive_as_negative_sum": positive_as_negative,
+                    "unlabeled_negative_sum": unlabeled_negative,
+                },
+                {
+                    "positive_count": positive_count,
+                    "unlabeled_count": unlabeled_count,
+                },
+                evidence={
+                    "positive_count": positive_count,
+                    "unlabeled_count": unlabeled_count,
+                },
+            ),
+            coverage_counts={
+                "train": batch.local_rows,
+                "coverage.positive": positive_count,
+                "coverage.unlabeled": unlabeled_count,
+            },
+            metrics=metrics,
+        )
+
+    def validation_step(
+        self, modules: TorchModuleSet, batch: TorchBatch, context: TorchStepContext
+    ) -> TorchStepResult:
+        return self.training_step(modules, batch, context)
+
+    def metric_plan(self, context: TorchRuntimeContext) -> TorchMetricPlan:
+        del context
+        return TorchMetricPlan(
+            {
+                "observed_positive_recall": "sum_count",
+                "train_loss": "sum_count",
+            }
+        )
 
 
 __all__ = ["DNNRecipe", "PURecipe"]

@@ -1,34 +1,74 @@
-"""Fixed-window LSTM and GRU TrainingRecipeV2 implementations."""
+"""Typed TorchRecipe implementations for fixed-window LSTM and GRU."""
 
 from __future__ import annotations
 
-import pickle
 from collections.abc import Mapping
 from typing import Any, cast
 
-from tributo.algorithms import (
-    MetricPlan,
-    OptimizationPlan,
-    TrainingRecipeV2,
-    TrainingStepResult,
+from tributo.algorithms.api.torch_runtime import (
+    TorchLossContribution,
+    TorchMetricContribution,
+)
+from tributo.algorithms.spi import (
+    TorchArtifactContext,
+    TorchArtifactPlan,
+    TorchBatch,
+    TorchBatchContext,
+    TorchBuildContext,
+    TorchMetricPlan,
+    TorchModuleSet,
+    TorchOptimizationPlan,
+    TorchRecipe,
+    TorchRuntimeContext,
+    TorchStepContext,
+    TorchStepResult,
 )
 
 
-def _accuracy(predictions: object, targets: object) -> object:
+def _config(context: TorchRuntimeContext | TorchBuildContext) -> Mapping[str, Any]:
+    runtime = context if isinstance(context, TorchRuntimeContext) else context.runtime
+    return cast(Mapping[str, Any], runtime.algorithm_config)
+
+
+def _batch(batch: object, context: TorchBatchContext) -> TorchBatch:
     import torch
 
-    values = cast(Any, predictions)
-    expected = cast(Any, targets)
-    predicted = (torch.sigmoid(values) >= 0.5).to(dtype=expected.dtype)
-    return (predicted == expected).to(dtype=torch.float32).mean()
+    if not isinstance(batch, Mapping):
+        raise ValueError("RNN batch must be columnar")
+    features = context.feature_names or tuple(
+        name for name in batch if name not in {context.label_name, context.weight_name}
+    )
+    label_name = context.label_name or ("label" if "label" in batch else None)
+    if len(features) < 2 or label_name is None:
+        raise ValueError("RNN requires a fixed window and label")
+    if context.weight_name is not None:
+        raise ValueError("RNN algorithms do not support sample-weight binding")
+    sequence = torch.stack(
+        [torch.as_tensor(batch[name], dtype=torch.float32) for name in features], dim=1
+    ).unsqueeze(-1)
+    targets = torch.as_tensor(batch[label_name], dtype=torch.float32).reshape(-1, 1)
+    if not torch.isfinite(sequence).all() or not torch.isfinite(targets).all():
+        raise ValueError("RNN inputs must be finite")
+    if not bool(((targets == 0) | (targets == 1)).all()):
+        raise ValueError("RNN labels must be 0 or 1")
+    rows = int(sequence.shape[0])
+    return TorchBatch(
+        keyword={"window": sequence},
+        targets=targets,
+        local_rows=rows,
+        coverage_counts={"train": rows},
+    )
 
 
-class _CheckpointCodec:
-    def dumps(self, value: object) -> bytes:
-        return pickle.dumps(value, protocol=5)
+def _accuracy(predictions: object, targets: object) -> TorchMetricContribution:
+    import torch
 
-    def loads(self, payload: bytes) -> object:
-        return pickle.loads(payload)
+    logits = cast(torch.Tensor, predictions).reshape(-1)
+    labels = cast(torch.Tensor, targets).reshape(-1)
+    return TorchMetricContribution(
+        float((torch.sigmoid(logits) >= 0.5).eq(labels >= 0.5).sum().item()),
+        int(labels.numel()),
+    )
 
 
 def _model(config: Mapping[str, Any], *, recurrent_kind: str) -> object:
@@ -53,135 +93,133 @@ def _model(config: Mapping[str, Any], *, recurrent_kind: str) -> object:
             self.output = torch.nn.Linear(hidden_size, 1)
 
         def forward(self, values: object) -> object:
-            sequence = cast(Any, values)
-            if sequence.ndim == 2:
-                sequence = sequence.unsqueeze(-1)
-            if sequence.ndim != 3:
-                raise ValueError("RNN input must have shape [batch, window, features]")
+            sequence = cast(torch.Tensor, values)
+            if (
+                sequence.ndim != 3
+                or sequence.shape[-1] != 1
+                or sequence.shape[1] != input_features
+            ):
+                raise ValueError("RNN input must have shape [batch, window, 1]")
             encoded, _ = self.recurrent(sequence)
             return self.output(encoded[:, -1, :])
 
     return RecurrentClassifier()
 
 
-class _BaseRNNRecipe(TrainingRecipeV2):
-    def batch_adapter(
-        self,
-        batch: object,
-        *,
-        feature_names: tuple[str, ...],
-        label_name: str | None,
-        weight_name: str | None,
-        config: Mapping[str, Any],
-    ) -> tuple[object, object, object | None, int]:
-        import torch
+class _BaseRNNRecipe(TorchRecipe):
+    recurrent_kind = "lstm"
 
-        if not isinstance(batch, Mapping) or label_name is None:
-            raise ValueError("RNN batch requires columnar features and a label")
-        model_config = config.get("model", {})
-        if not isinstance(model_config, Mapping):
-            raise ValueError("RNN model config must be a mapping")
-        if int(model_config.get("input_features", len(feature_names))) != len(
-            feature_names
-        ):
-            raise ValueError("RNN input_features must match the fixed window width")
-        sequence = torch.stack(
-            [batch[name].to(dtype=torch.float32) for name in feature_names], dim=1
-        ).unsqueeze(-1)
-        targets = batch[label_name].to(dtype=torch.float32).reshape(-1, 1)
-        if not bool(((targets == 0) | (targets == 1)).all()):
-            raise ValueError("RNN classifier labels must be 0 or 1")
-        weights = batch.get(weight_name) if weight_name is not None else None
-        return sequence, targets, weights, int(sequence.shape[0])
+    def adapt_batch(self, batch: object, context: TorchBatchContext) -> TorchBatch:
+        return _batch(batch, context)
 
     def training_step(
-        self,
-        modules: Mapping[str, object],
-        features: object,
-        targets: object,
-        weights: object | None,
-        config: Mapping[str, Any],
-    ) -> TrainingStepResult:
-        del weights, config
-        model = cast(Any, modules["model"])
-        loss = cast(Any, modules["loss"])
-        predictions = model(features)
-        return TrainingStepResult(predictions, loss(predictions, targets))
-
-    def validation_step(
-        self,
-        modules: Mapping[str, object],
-        features: object,
-        targets: object,
-        weights: object | None,
-        config: Mapping[str, Any],
-    ) -> TrainingStepResult:
-        return self.training_step(modules, features, targets, weights, config)
-
-    def optimization_plan(
-        self,
-        model: object,
-        config: Mapping[str, Any],
-    ) -> OptimizationPlan:
+        self, modules: TorchModuleSet, batch: TorchBatch, context: TorchStepContext
+    ) -> TorchStepResult:
+        del context
         import torch
 
-        optimizer_config = config.get("optimizer", {})
-        if not isinstance(optimizer_config, Mapping):
-            raise ValueError("RNN optimizer config must be a mapping")
-        learning_rate = float(optimizer_config.get("learning_rate", 0.001))
-        weight_decay = float(optimizer_config.get("weight_decay", 0.0))
-        accumulation_steps = int(optimizer_config.get("accumulation_steps", 1))
-        max_gradient_norm = float(optimizer_config.get("max_gradient_norm", 1.0))
-        if learning_rate <= 0 or weight_decay < 0 or accumulation_steps < 1:
-            raise ValueError("RNN optimizer parameters are invalid")
-        if max_gradient_norm <= 0:
-            raise ValueError("RNN max_gradient_norm must be positive")
-        return OptimizationPlan(
-            optimizer=torch.optim.Adam(
-                cast(Any, model).parameters(),
-                lr=learning_rate,
-                weight_decay=weight_decay,
-            ),
-            gradient_accumulation_steps=accumulation_steps,
-            max_gradient_norm=max_gradient_norm,
+        predictions = cast(torch.nn.Module, modules["model"])(batch.keyword["window"])
+        targets = cast(torch.Tensor, batch.targets)
+        numerator = torch.nn.functional.binary_cross_entropy_with_logits(
+            predictions, targets, reduction="sum"
+        )
+        return TorchStepResult(
+            outputs={"output": predictions},
+            loss=TorchLossContribution(numerator, batch.local_rows),
+            coverage_counts=dict(batch.coverage_counts),
+            metrics={"accuracy": _accuracy(predictions, targets)},
         )
 
-    def metric_plan(self, config: Mapping[str, Any]) -> MetricPlan:
-        del config
-        return MetricPlan(factories={"accuracy": _accuracy})
+    def validation_step(
+        self, modules: TorchModuleSet, batch: TorchBatch, context: TorchStepContext
+    ) -> TorchStepResult:
+        return self.training_step(modules, batch, context)
 
-    def checkpoint_codec(self) -> object:
-        return _CheckpointCodec()
+    def configure_optimizers(
+        self, modules: TorchModuleSet, context: TorchBuildContext
+    ) -> TorchOptimizationPlan:
+        import torch
+
+        optimizer_config = _config(context).get("optimizer", {})
+        if not isinstance(optimizer_config, Mapping):
+            raise ValueError("RNN optimizer config must be a mapping")
+        return TorchOptimizationPlan(
+            optimizer=torch.optim.Adam(
+                cast(torch.nn.Module, modules["model"]).parameters(),
+                lr=float(optimizer_config.get("learning_rate", 0.001)),
+                weight_decay=float(optimizer_config.get("weight_decay", 0.0)),
+            ),
+            gradient_accumulation_steps=int(
+                optimizer_config.get("accumulation_steps", 1)
+            ),
+            max_gradient_norm=float(optimizer_config.get("max_gradient_norm", 1.0)),
+        )
+
+    def metric_plan(self, context: TorchRuntimeContext) -> TorchMetricPlan:
+        del context
+        return TorchMetricPlan({"accuracy": "sum_count", "train_loss": "sum_count"})
+
+    def artifact_plan(self, context: TorchArtifactContext) -> TorchArtifactPlan:
+        config = context.stage.runtime.algorithm_config
+        model_config = config.get("model", {})
+        features = (
+            int(model_config.get("input_features", 4))
+            if isinstance(model_config, Mapping)
+            else 4
+        )
+        return TorchArtifactPlan(
+            source_kind="torch_module",
+            input_signature=(
+                {"name": "window", "dtype": "float32", "shape": ("batch", features, 1)},
+            ),
+            output_signature=(
+                {"name": "output", "dtype": "float32", "shape": ("batch", 1)},
+            ),
+            targets=(
+                {
+                    "name": "onnx-model",
+                    "format": "onnx",
+                    "exporter_id": "torch-onnx-v1",
+                    "options": {"dynamo": False},
+                },
+            ),
+            roles={"inference": "onnx-model"},
+        )
 
 
 class LSTMRecipe(_BaseRNNRecipe):
     """Train a fixed-window LSTM binary classifier."""
 
-    def build_modules(self, config: Mapping[str, Any]) -> Mapping[str, object]:
+    recurrent_kind = "lstm"
+
+    def build_modules(self, context: TorchBuildContext) -> TorchModuleSet:
         import torch
 
-        model_config = config.get("model", {})
-        if not isinstance(model_config, Mapping):
+        config = _config(context).get("model", {})
+        if not isinstance(config, Mapping):
             raise ValueError("LSTM model config must be a mapping")
-        return {
-            "model": _model(model_config, recurrent_kind="lstm"),
-            "loss": torch.nn.BCEWithLogitsLoss(),
-        }
+        return TorchModuleSet(
+            {
+                "model": _model(config, recurrent_kind="lstm"),
+                "loss": torch.nn.Identity(),
+            }
+        )
 
 
 class GRURecipe(_BaseRNNRecipe):
     """Train a fixed-window GRU binary classifier."""
 
-    def build_modules(self, config: Mapping[str, Any]) -> Mapping[str, object]:
+    recurrent_kind = "gru"
+
+    def build_modules(self, context: TorchBuildContext) -> TorchModuleSet:
         import torch
 
-        model_config = config.get("model", {})
-        if not isinstance(model_config, Mapping):
+        config = _config(context).get("model", {})
+        if not isinstance(config, Mapping):
             raise ValueError("GRU model config must be a mapping")
-        return {
-            "model": _model(model_config, recurrent_kind="gru"),
-            "loss": torch.nn.BCEWithLogitsLoss(),
-        }
+        return TorchModuleSet(
+            {"model": _model(config, recurrent_kind="gru"), "loss": torch.nn.Identity()}
+        )
 
 
 __all__ = ["GRURecipe", "LSTMRecipe"]

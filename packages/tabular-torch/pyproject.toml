@@ -10,8 +10,8 @@ dependencies = [
 ]
 
 [project.entry-points."tributo.algorithms"]
-"dnn.recipe_v2" = "tributo_algorithms_tabular_torch.descriptor:DNN_DESCRIPTOR"
-"pu.recipe_v2" = "tributo_algorithms_tabular_torch.descriptor:PU_DESCRIPTOR"
+dnn = "tributo_algorithms_tabular_torch.descriptor:DNN_DESCRIPTOR"
+pu = "tributo_algorithms_tabular_torch.descriptor:PU_DESCRIPTOR"
 
 [build-system]
 requires = ["hatchling"]

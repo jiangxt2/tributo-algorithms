@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 from collections.abc import Mapping
 from typing import Any
+
+_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 
 class DistillationConfigValidator:
@@ -22,7 +26,11 @@ class DistillationConfigValidator:
             if not isinstance(item, int) or isinstance(item, bool) or item < 1:
                 raise ValueError(f"model.{name} must be positive")
         output = value.get("output")
-        if not isinstance(output, Mapping) or not output.get("bundle_uri"):
+        if (
+            not isinstance(output, Mapping)
+            or not isinstance(output.get("bundle_uri"), str)
+            or not output["bundle_uri"]
+        ):
             raise ValueError("output.bundle_uri is required")
         ray = value.get("ray")
         if not isinstance(ray, Mapping) or not ray.get("storage_path"):
@@ -32,7 +40,7 @@ class DistillationConfigValidator:
 
 class DistillationInputValidator:
     api_version = 1
-    schema_digest = "b" * 64
+    schema_digest = hashlib.sha256(b"tributo.distillation.dense-labeled.v2").hexdigest()
 
     def validate(self, value: Mapping[str, Any]) -> Mapping[str, Any]:
         bindings = value.get("bindings")
@@ -41,8 +49,10 @@ class DistillationInputValidator:
         binding = bindings[0]
         if (
             not isinstance(binding, Mapping)
+            or binding.get("role", "train") != "train"
             or not binding.get("feature_names")
             or not binding.get("label_name")
+            or binding.get("sample_weight_name") is not None
         ):
             raise ValueError("distillation requires dense features and label")
         return value
@@ -56,14 +66,14 @@ class DistillationOutputValidator:
         outputs = value.get("outputs")
         if value.get("status") != "succeeded" or not isinstance(outputs, Mapping):
             raise ValueError("distillation failed")
-        if not outputs.get("bundle_uri"):
+        if not isinstance(outputs.get("bundle_uri"), str) or not outputs["bundle_uri"]:
             raise ValueError("distillation requires Student Bundle")
         return value
 
 
 class DistillationCoverageValidator:
     api_version = 1
-    schema_digest = "d" * 64
+    schema_digest = hashlib.sha256(b"tributo.distillation.coverage.v2").hexdigest()
 
     def validate(self, value: Mapping[str, Any]) -> Mapping[str, Any]:
         if (
@@ -106,14 +116,19 @@ class PretrainFinetuneConfigValidator:
                 raise ValueError(f"training.{name} must be positive")
         if not value["ray"].get("storage_path"):
             raise ValueError("ray.storage_path is required")
-        if not value["output"].get("bundle_uri"):
+        if (
+            not isinstance(value["output"].get("bundle_uri"), str)
+            or not value["output"]["bundle_uri"]
+        ):
             raise ValueError("output.bundle_uri is required")
         return dict(value)
 
 
 class PretrainFinetuneInputValidator:
     api_version = 1
-    schema_digest = "f" * 64
+    schema_digest = hashlib.sha256(
+        b"tributo.pretrain-finetune.dense-labeled.v2"
+    ).hexdigest()
 
     def validate(self, value: Mapping[str, Any]) -> Mapping[str, Any]:
         bindings = value.get("bindings")
@@ -122,8 +137,10 @@ class PretrainFinetuneInputValidator:
         binding = bindings[0]
         if (
             not isinstance(binding, Mapping)
+            or binding.get("role", "train") != "train"
             or not binding.get("feature_names")
             or not binding.get("label_name")
+            or binding.get("sample_weight_name") is not None
         ):
             raise ValueError("pretrain-finetune requires dense features and label")
         return value
@@ -137,14 +154,19 @@ class PretrainFinetuneOutputValidator:
         outputs = value.get("outputs")
         if value.get("status") != "succeeded" or not isinstance(outputs, Mapping):
             raise ValueError("pretrain-finetune failed")
-        if not outputs.get("bundle_uri") or not outputs.get("composition_digest"):
+        if (
+            not isinstance(outputs.get("bundle_uri"), str)
+            or not outputs["bundle_uri"]
+            or not isinstance(outputs.get("composition_digest"), str)
+            or _SHA256_RE.fullmatch(outputs["composition_digest"]) is None
+        ):
             raise ValueError("pretrain-finetune requires Bundle and composition digest")
         return value
 
 
 class PretrainFinetuneCoverageValidator:
     api_version = 1
-    schema_digest = "1" * 64
+    schema_digest = hashlib.sha256(b"tributo.pretrain-finetune.coverage.v2").hexdigest()
 
     def validate(self, value: Mapping[str, Any]) -> Mapping[str, Any]:
         if (
@@ -164,13 +186,33 @@ class PretrainFinetuneCoverageValidator:
         return value
 
 
+class DistillationTorchInputValidator(DistillationInputValidator):
+    pass
+
+
+class DistillationTorchCoverageValidator(DistillationCoverageValidator):
+    pass
+
+
+class PretrainFinetuneTorchInputValidator(PretrainFinetuneInputValidator):
+    pass
+
+
+class PretrainFinetuneTorchCoverageValidator(PretrainFinetuneCoverageValidator):
+    pass
+
+
 __all__ = [
     "DistillationConfigValidator",
     "DistillationCoverageValidator",
     "DistillationInputValidator",
     "DistillationOutputValidator",
+    "DistillationTorchCoverageValidator",
+    "DistillationTorchInputValidator",
     "PretrainFinetuneConfigValidator",
     "PretrainFinetuneCoverageValidator",
     "PretrainFinetuneInputValidator",
     "PretrainFinetuneOutputValidator",
+    "PretrainFinetuneTorchCoverageValidator",
+    "PretrainFinetuneTorchInputValidator",
 ]

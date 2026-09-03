@@ -1,24 +1,38 @@
-"""Tests for the official pre-tokenized Transformer classifier."""
+"""Tests for the pre-tokenized Transformer TorchRecipe."""
 
 from __future__ import annotations
 
+import hashlib
+
+import pytest
 import torch
-from tributo.algorithms import TrainingStepResult
-from tributo.algorithms.api import DistributionStrategy
+from tributo.algorithms import (
+    DistributionStrategy,
+    TorchBatchContext,
+    TorchBuildContext,
+    TorchRuntimeContext,
+    TorchStageContext,
+    TorchStageRunIdentity,
+    TorchStepContext,
+)
 from tributo_algorithms_transformers_nlp import TOKEN_TRANSFORMER_DESCRIPTOR
 from tributo_algorithms_transformers_nlp.recipe import TokenTransformerRecipe
 
 
-def test_transformer_descriptor_uses_recipe_v2() -> None:
-    distribution = TOKEN_TRANSFORMER_DESCRIPTOR.registration.distribution_spec
-    assert distribution is not None
-    assert distribution.strategy is DistributionStrategy.RAY_TRAIN_RECIPE_V2
-    assert TOKEN_TRANSFORMER_DESCRIPTOR.registration.contract_bindings is not None
-
-
-def test_transformer_recipe_consumes_ordered_token_columns() -> None:
-    recipe = TokenTransformerRecipe()
-    modules = recipe.build_modules(
+def _context() -> TorchBuildContext:
+    policy = TOKEN_TRANSFORMER_DESCRIPTOR.registration.distribution_spec.policy
+    identity = TorchStageRunIdentity(
+        "aabbccdd",
+        "11223344",
+        "train",
+        1,
+        "transformer",
+        "transformer",
+        hashlib.sha256(b"transformer").hexdigest(),
+        policy.digest,
+        policy.execution_plan.digest,
+    )
+    runtime = TorchRuntimeContext(
         {
             "model": {
                 "vocab_size": 32,
@@ -26,26 +40,60 @@ def test_transformer_recipe_consumes_ordered_token_columns() -> None:
                 "hidden_size": 8,
                 "heads": 2,
             }
-        }
+        },
+        "transformer",
+        1,
+        policy.digest,
+        policy.execution_plan.digest,
+        identity,
+        input_binding_digest="1" * 64,
     )
-    batch = {
-        "token_0": torch.tensor([1, 4]),
-        "token_1": torch.tensor([2, 5]),
-        "token_2": torch.tensor([3, 0]),
-        "token_3": torch.tensor([0, 0]),
-        "label": torch.tensor([1.0, 0.0]),
-    }
-    features, targets, weights, rows = recipe.batch_adapter(
-        batch,
-        feature_names=("token_0", "token_1", "token_2", "token_3"),
-        label_name="label",
-        weight_name=None,
-        config={},
-    )
-    step = recipe.training_step(modules, features, targets, weights, {})
+    stage = TorchStageContext(runtime, "train", 0, True, ("train",))
+    return TorchBuildContext(runtime, stage)
 
-    assert isinstance(step, TrainingStepResult)
-    assert features.shape == (2, 4)
-    assert step.predictions.shape == (2, 1)
-    assert step.loss.ndim == 0
-    assert rows == 2
+
+def test_transformer_descriptor_uses_torch_runtime() -> None:
+    distribution = TOKEN_TRANSFORMER_DESCRIPTOR.registration.distribution_spec
+    assert distribution is not None
+    assert distribution.strategy is DistributionStrategy.RAY_TRAIN_TORCH
+
+
+def test_transformer_derives_padding_mask_from_input_ids() -> None:
+    recipe = TokenTransformerRecipe()
+    build = _context()
+    batch_context = TorchBatchContext(
+        build.stage, ("token_0", "token_1", "token_2", "token_3"), "label"
+    )
+    modules = recipe.build_modules(build)
+    adapted = recipe.adapt_batch(
+        {
+            "token_0": torch.tensor([1, 4]),
+            "token_1": torch.tensor([2, 5]),
+            "token_2": torch.tensor([3, 0]),
+            "token_3": torch.tensor([0, 0]),
+            "label": torch.tensor([1.0, 0.0]),
+        },
+        batch_context,
+    )
+    result = recipe.training_step(modules, adapted, TorchStepContext(build.stage, 0, 0))
+    assert adapted.keyword["input_ids"].dtype == torch.int64
+    assert result.outputs["output"].shape == (2, 1)
+    assert result.loss.normalizer == 2
+
+
+def test_transformer_rejects_all_padding_rows() -> None:
+    recipe = TokenTransformerRecipe()
+    build = _context()
+    with pytest.raises(ValueError, match="non-padding"):
+        recipe.adapt_batch(
+            {
+                "token_0": torch.tensor([0]),
+                "token_1": torch.tensor([0]),
+                "token_2": torch.tensor([0]),
+                "token_3": torch.tensor([0]),
+                "label": torch.tensor([1.0]),
+            },
+            TorchBatchContext(
+                build.stage, ("token_0", "token_1", "token_2", "token_3"), "label"
+            ),
+        )

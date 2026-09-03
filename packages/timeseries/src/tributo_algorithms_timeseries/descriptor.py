@@ -1,6 +1,10 @@
-"""Descriptor for the official temporal convolution classifier."""
+"""Descriptor for the official temporal convolution TorchRecipe."""
 
 from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+from typing import Any
 
 from tributo.algorithms import AlgorithmBuilder
 from tributo.algorithms.api import (
@@ -11,22 +15,40 @@ from tributo.algorithms.api import (
     ExecutionProfile,
     MetricReduction,
     QualifiedReference,
+    SingleStageTorchPlan,
+    TorchDatasetRoute,
+    TorchPolicy,
+    TorchStageSpec,
     WorkerRange,
     WorkerResources,
 )
 from tributo.training.algorithm_spec import AlgorithmSpec, Capability, ProblemType
 
+from tributo_algorithms_timeseries.contracts import (
+    TemporalConvTensorInputValidator,
+    TemporalConvTorchCoverageValidator,
+    TimeSeriesConfigValidator,
+    TimeSeriesOutputValidator,
+)
+
 _PACKAGE = "tributo-algorithms-timeseries"
 _VERSION = "0.1.0"
+_ROOT = Path(__file__).resolve().parent
 
 
-def _binding(contract_id: str, digest: str, validator: str) -> ContractBinding:
+def _code_digest(filename: str) -> str:
+    return hashlib.sha256((_ROOT / filename).read_bytes()).hexdigest()
+
+
+def _binding(
+    contract_id: str, validator: type[Any], version: int = 2
+) -> ContractBinding:
     return ContractBinding(
         contract_id=contract_id,
-        schema_version=1,
-        schema_digest=digest * 64,
+        schema_version=version,
+        schema_digest=str(validator.schema_digest),
         validator_ref=QualifiedReference.parse(
-            f"tributo_algorithms_timeseries.contracts:{validator}"
+            f"tributo_algorithms_timeseries.contracts:{validator.__name__}"
         ),
     )
 
@@ -44,42 +66,56 @@ _SPEC = AlgorithmSpec(
     model_family="temporal_convolution",
     data_modalities=("time_series",),
     lifecycle_kind="batch_fit",
-    allowed_execution_modes=(ExecutionMode.TRAINING_RECIPE_V2.value,),
+    allowed_execution_modes=(ExecutionMode.RAY_TRAIN_TORCH.value,),
     config_contract_ref="tributo.official.timeseries.tcn.config.v1",
-    input_contract_ref="tributo.official.timeseries.window.v1",
+    input_contract_ref="tributo.official.timeseries.tcn.window-tensor.v2",
     output_contract_ref="tributo.official.timeseries.tcn.onnx.v1",
 )
 
+_POLICY = TorchPolicy(
+    torch_runtime_api_version=1,
+    loop_owner="core_recipe",
+    parallelism_id="torch.ddp.replicated",
+    dataset_routing=(
+        TorchDatasetRoute("train", "split_exact", True, 1, 1, "reject"),
+        TorchDatasetRoute("val", "split_exact", False, 1, 0, "zero_contribution"),
+        TorchDatasetRoute("test", "split_exact", False, 1, 0, "zero_contribution"),
+    ),
+    execution_plan=SingleStageTorchPlan(
+        stage=TorchStageSpec(
+            "train",
+            "tributo.integrations.algorithm_runtimes.ray_train_torch:torch_recipe_train_loop_per_worker",
+            ("train", "val", "test"),
+            metric_mapping={"accuracy": "accuracy", "train_loss": "train_loss"},
+        )
+    ),
+    state_layout="replicated",
+    metric_reducers={
+        "accuracy": MetricReduction.SUM_COUNT,
+        "train_loss": MetricReduction.SUM_COUNT,
+    },
+    backend="auto",
+    resume_supported=True,
+    same_world_size_resume=True,
+)
+
 _CONTRACTS = ContractBindingSet(
-    config=_binding(
-        _SPEC.config_contract_ref or "",
-        "5",
-        "TimeSeriesConfigValidator",
-    ),
-    input=_binding(
-        _SPEC.input_contract_ref or "",
-        "6",
-        "WindowInputValidator",
-    ),
-    output=_binding(
-        _SPEC.output_contract_ref or "",
-        "7",
-        "TimeSeriesOutputValidator",
-    ),
+    config=_binding(_SPEC.config_contract_ref or "", TimeSeriesConfigValidator, 1),
+    input=_binding(_SPEC.input_contract_ref or "", TemporalConvTensorInputValidator),
+    output=_binding(_SPEC.output_contract_ref or "", TimeSeriesOutputValidator, 1),
     coverage=_binding(
-        "tributo.official.timeseries.window.coverage.v1",
-        "8",
-        "WindowCoverageValidator",
+        "tributo.official.timeseries.tcn.torch-coverage.v2",
+        TemporalConvTorchCoverageValidator,
     ),
 )
 
-TEMPORAL_CONV_DESCRIPTOR = AlgorithmBuilder.from_training_recipe_v2(
+TEMPORAL_CONV_DESCRIPTOR = AlgorithmBuilder.from_torch(
     spec=_SPEC,
     implementation_id="tributo.official.timeseries.temporal_conv",
-    implementation_version="1.0.0",
+    implementation_version="2.0.0",
     recipe="tributo_algorithms_timeseries.recipe:TemporalConvRecipe",
     environment=EnvironmentSpec(
-        environment_id="tributo.official.timeseries.v1",
+        environment_id="tributo.official.timeseries.v2",
         dependencies=(
             "onnx>=1.16",
             "onnxruntime>=1.20",
@@ -95,6 +131,8 @@ TEMPORAL_CONV_DESCRIPTOR = AlgorithmBuilder.from_training_recipe_v2(
     package_name=_PACKAGE,
     package_version=_VERSION,
     tributo_version_spec=">=1,<2",
+    policy=_POLICY,
+    code_digest=_code_digest("recipe.py"),
     contract_bindings=_CONTRACTS,
     descriptor_api_version=2,
     is_default=True,
