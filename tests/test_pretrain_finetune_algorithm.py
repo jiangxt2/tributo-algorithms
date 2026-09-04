@@ -12,7 +12,7 @@ from tributo.algorithms import (
     RayTorchAdapter,
     TorchCheckpointRef,
 )
-from tributo.algorithms.api import AlgorithmExecutionError
+from tributo.algorithms.api import AlgorithmConfigurationError, AlgorithmExecutionError
 from tributo.algorithms.spi import (
     TorchArtifactContext,
     TorchRuntimeContext,
@@ -29,7 +29,8 @@ from tributo_algorithms_multistage_torch.contracts import (
 )
 from tributo_algorithms_multistage_torch.pretrain import (
     _finetune_model,
-    _load_retry_state,
+    _gradient_clip_norm,
+    _load_encoder_checkpoint,
     _pretrain_model,
     _state_digest,
 )
@@ -56,6 +57,47 @@ def test_pretraining_and_finetuning_models_have_expected_heads() -> None:
     assert hasattr(pretrain, "decoder")
     assert hasattr(finetune, "classifier")
     assert len(_state_digest(pretrain.state_dict())) == 64
+
+
+@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf")])
+def test_pretrain_finetune_rejects_invalid_gradient_clip_norm(value: float) -> None:
+    with pytest.raises(AlgorithmConfigurationError, match="positive and finite"):
+        _gradient_clip_norm({"max_gradient_norm": value})
+
+
+def test_finetune_stage_loads_pretrain_stage_dependency(tmp_path) -> None:
+    source = _pretrain_model(2, 4)
+    target = _finetune_model(2, 4)
+    torch.save(source.encoder.state_dict(), tmp_path / "encoder.pt")
+
+    class Checkpoint:
+        @contextmanager
+        def as_directory(self):
+            yield str(tmp_path)
+
+    runtime = TorchRuntimeContext({}, "example.pretrain", 1, "a" * 64, "b" * 64)
+    stage = TorchStageContext(
+        runtime,
+        "finetune",
+        1,
+        True,
+        ("train",),
+        predecessor_stage_id="pretrain",
+    )
+    checkpoint = TorchWorkerCheckpointContext(
+        stage,
+        "stage_dependency",
+        TorchCheckpointRef(Checkpoint()),
+    )
+
+    _load_encoder_checkpoint(checkpoint, target)
+
+    assert all(
+        torch.equal(
+            source.encoder.state_dict()[name], target.encoder.state_dict()[name]
+        )
+        for name in source.encoder.state_dict()
+    )
 
 
 def test_pretrain_finetune_coverage_requires_both_stages() -> None:
@@ -181,61 +223,3 @@ def test_pretrain_checkpoint_source_requires_a_checkpoint() -> None:
         DistributedPretrainFinetune().checkpoint_source(
             type("Result", (), {})(), object()
         )
-
-
-def test_pretrain_retry_checkpoint_requires_optimizer_state(tmp_path) -> None:
-    class Checkpoint:
-        @contextmanager
-        def as_directory(self):
-            yield str(tmp_path)
-
-    runtime = TorchRuntimeContext({}, "example.pretrain", 1, "a" * 64, "b" * 64)
-    stage = TorchStageContext(runtime, "pretrain", 0, True, ("train",))
-    context = TorchWorkerCheckpointContext(
-        stage, "ray_failure_retry", TorchCheckpointRef(Checkpoint())
-    )
-    model = _pretrain_model(2, 4)
-    optimizer = torch.optim.Adam(model.parameters())
-    torch.save(model.state_dict(), tmp_path / "model.pt")
-    with pytest.raises(AlgorithmExecutionError, match="model/optimizer state"):
-        _load_retry_state(context, model, optimizer, rank=0)
-
-
-def test_pretrain_retry_checkpoint_restores_optimizer_and_rng_state(tmp_path) -> None:
-    class Checkpoint:
-        @contextmanager
-        def as_directory(self):
-            yield str(tmp_path)
-
-    runtime = TorchRuntimeContext({}, "example.pretrain", 1, "a" * 64, "b" * 64)
-    stage = TorchStageContext(runtime, "pretrain", 0, True, ("train",))
-    context = TorchWorkerCheckpointContext(
-        stage, "ray_failure_retry", TorchCheckpointRef(Checkpoint())
-    )
-    torch.manual_seed(31)
-    saved_model = _pretrain_model(2, 4)
-    saved_optimizer = torch.optim.Adam(saved_model.parameters())
-    sum(parameter.square().sum() for parameter in saved_model.parameters()).backward()
-    saved_optimizer.step()
-    expected_state = {
-        name: value.detach().clone() for name, value in saved_model.state_dict().items()
-    }
-    expected_rng = torch.get_rng_state().clone()
-    torch.save(saved_model.state_dict(), tmp_path / "model.pt")
-    torch.save(saved_optimizer.state_dict(), tmp_path / "optimizer.pt")
-    torch.save({"states": [expected_rng.numpy().tobytes()]}, tmp_path / "rng_state.pt")
-
-    target_model = _pretrain_model(2, 4)
-    target_optimizer = torch.optim.Adam(target_model.parameters())
-    torch.manual_seed(99)
-    assert _load_retry_state(context, target_model, target_optimizer, rank=0) == 0
-    for name, value in target_model.state_dict().items():
-        torch.testing.assert_close(value, expected_state[name])
-    assert target_optimizer.state_dict()["state"]
-    torch.testing.assert_close(torch.get_rng_state(), expected_rng)
-
-    wrong_source = TorchWorkerCheckpointContext(
-        stage, "stage_dependency", TorchCheckpointRef(Checkpoint())
-    )
-    with pytest.raises(AlgorithmExecutionError, match="only Ray failure retry"):
-        _load_retry_state(wrong_source, target_model, target_optimizer, rank=0)

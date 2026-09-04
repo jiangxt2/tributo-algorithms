@@ -12,12 +12,11 @@ from tributo.algorithms import (
     RayTorchAdapter,
     TorchCheckpointRef,
 )
-from tributo.algorithms.api import AlgorithmExecutionError
+from tributo.algorithms.api import AlgorithmConfigurationError, AlgorithmExecutionError
 from tributo.algorithms.spi import (
     TorchArtifactContext,
     TorchRuntimeContext,
     TorchStageContext,
-    TorchWorkerCheckpointContext,
 )
 from tributo_algorithms_graph_pyg import (
     GRAPHSAGE_DESCRIPTOR,
@@ -27,9 +26,10 @@ from tributo_algorithms_graph_pyg import (
 )
 from tributo_algorithms_graph_pyg.algorithm import (
     _build_model,
+    _gradient_clip_norm,
     _graph_identity_digest,
     _graph_source_fingerprint,
-    _load_checkpoint_state,
+    _integer_values,
     _node_lookup_model,
     _state_digest,
     _tensor_digest,
@@ -141,6 +141,20 @@ def test_graph_lookup_marks_invalid_node_ids_without_wraparound() -> None:
     torch.testing.assert_close(output[1, :2], logits[2])
     torch.testing.assert_close(output[[0, 2], :2], torch.zeros((2, 2)))
     torch.testing.assert_close(output[:, 2], torch.tensor([0.0, 1.0, 0.0]))
+    with pytest.raises(ValueError, match="integer values"):
+        lookup(torch.tensor([1.5]))
+
+
+@pytest.mark.parametrize("values", [[1.5], [True]])
+def test_graph_rejects_non_integer_ids(values: list[object]) -> None:
+    with pytest.raises(AlgorithmExecutionError, match="integer values"):
+        _integer_values(values, "graph node IDs")
+
+
+@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf")])
+def test_graph_rejects_invalid_gradient_clip_norm(value: float) -> None:
+    with pytest.raises(AlgorithmConfigurationError, match="positive and finite"):
+        _gradient_clip_norm({"max_gradient_norm": value})
 
 
 def test_graph_identity_and_source_fingerprint_bind_all_state() -> None:
@@ -421,61 +435,3 @@ def test_rgcn_export_source_preserves_typed_signature_and_inference(tmp_path) ->
 def test_graph_checkpoint_source_requires_a_checkpoint() -> None:
     with pytest.raises(AlgorithmExecutionError, match="no checkpoint"):
         DistributedGraphSAGE().checkpoint_source(type("Result", (), {})(), object())
-
-
-def test_graph_retry_checkpoint_requires_optimizer_state(tmp_path) -> None:
-    class Checkpoint:
-        @contextmanager
-        def as_directory(self):
-            yield str(tmp_path)
-
-    runtime = TorchRuntimeContext({}, "example.graph", 1, "a" * 64, "b" * 64)
-    stage = TorchStageContext(runtime, "train", 0, True, ("train",))
-    context = TorchWorkerCheckpointContext(
-        stage, "ray_failure_retry", TorchCheckpointRef(Checkpoint())
-    )
-    model = _build_model(2, 4, 2)
-    optimizer = torch.optim.Adam(model.parameters())
-    torch.save(model.state_dict(), tmp_path / "model.pt")
-    with pytest.raises(AlgorithmExecutionError, match="model/optimizer state"):
-        _load_checkpoint_state(context, model, optimizer, rank=0)
-
-
-def test_graph_retry_checkpoint_restores_optimizer_and_rng_state(tmp_path) -> None:
-    class Checkpoint:
-        @contextmanager
-        def as_directory(self):
-            yield str(tmp_path)
-
-    runtime = TorchRuntimeContext({}, "example.graph", 1, "a" * 64, "b" * 64)
-    stage = TorchStageContext(runtime, "train", 0, True, ("train",))
-    context = TorchWorkerCheckpointContext(
-        stage, "ray_failure_retry", TorchCheckpointRef(Checkpoint())
-    )
-    torch.manual_seed(17)
-    saved_model = _build_model(2, 4, 2)
-    saved_optimizer = torch.optim.Adam(saved_model.parameters())
-    sum(parameter.square().sum() for parameter in saved_model.parameters()).backward()
-    saved_optimizer.step()
-    expected_state = {
-        name: value.detach().clone() for name, value in saved_model.state_dict().items()
-    }
-    expected_rng = torch.get_rng_state().clone()
-    torch.save(saved_model.state_dict(), tmp_path / "model.pt")
-    torch.save(saved_optimizer.state_dict(), tmp_path / "optimizer.pt")
-    torch.save({"states": [expected_rng.numpy().tobytes()]}, tmp_path / "rng_state.pt")
-
-    target_model = _build_model(2, 4, 2)
-    target_optimizer = torch.optim.Adam(target_model.parameters())
-    torch.manual_seed(99)
-    assert _load_checkpoint_state(context, target_model, target_optimizer, rank=0) == 0
-    for name, value in target_model.state_dict().items():
-        torch.testing.assert_close(value, expected_state[name])
-    assert target_optimizer.state_dict()["state"]
-    torch.testing.assert_close(torch.get_rng_state(), expected_rng)
-
-    wrong_source = TorchWorkerCheckpointContext(
-        stage, "stage_dependency", TorchCheckpointRef(Checkpoint())
-    )
-    with pytest.raises(AlgorithmExecutionError, match="only Ray failure retry"):
-        _load_checkpoint_state(wrong_source, target_model, target_optimizer, rank=0)

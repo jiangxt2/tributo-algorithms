@@ -73,9 +73,7 @@ def _policy(*, relational: bool) -> TorchPolicy:
         execution_plan=SingleStageTorchPlan(
             stage=TorchStageSpec(
                 "train",
-                "tributo.integrations.algorithm_runtimes.ray_train_torch:ray_torch_adapter_train_loop_per_worker",
                 ("train", "nodes", "edges"),
-                metric_mapping={"train_loss": "train_loss", "accuracy": "accuracy"},
             )
         ),
         state_layout="replicated",
@@ -84,8 +82,6 @@ def _policy(*, relational: bool) -> TorchPolicy:
             "accuracy": MetricReduction.SUM_COUNT,
         },
         backend="auto",
-        resume_supported=False,
-        same_world_size_resume=None,
         max_replicated_bytes_per_worker=536_870_912,
     )
 

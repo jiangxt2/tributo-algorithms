@@ -56,7 +56,6 @@ def _batch(batch: object, context: TorchBatchContext) -> TorchBatch:
         keyword={"window": sequence},
         targets=targets,
         local_rows=rows,
-        coverage_counts={"train": rows},
     )
 
 
@@ -94,6 +93,8 @@ def _model(config: Mapping[str, Any], *, recurrent_kind: str) -> object:
 
         def forward(self, values: object) -> object:
             sequence = cast(torch.Tensor, values)
+            if sequence.ndim == 2 and sequence.shape[1] == input_features:
+                sequence = sequence.unsqueeze(-1)
             if (
                 sequence.ndim != 3
                 or sequence.shape[-1] != 1
@@ -126,7 +127,6 @@ class _BaseRNNRecipe(TorchRecipe):
         return TorchStepResult(
             outputs={"output": predictions},
             loss=TorchLossContribution(numerator, batch.local_rows),
-            coverage_counts=dict(batch.coverage_counts),
             metrics={"accuracy": _accuracy(predictions, targets)},
         )
 
@@ -149,10 +149,8 @@ class _BaseRNNRecipe(TorchRecipe):
                 lr=float(optimizer_config.get("learning_rate", 0.001)),
                 weight_decay=float(optimizer_config.get("weight_decay", 0.0)),
             ),
-            gradient_accumulation_steps=int(
-                optimizer_config.get("accumulation_steps", 1)
-            ),
-            max_gradient_norm=float(optimizer_config.get("max_gradient_norm", 1.0)),
+            gradient_accumulation_steps=optimizer_config.get("accumulation_steps", 1),
+            max_gradient_norm=optimizer_config.get("max_gradient_norm", 1.0),
         )
 
     def metric_plan(self, context: TorchRuntimeContext) -> TorchMetricPlan:
@@ -170,7 +168,7 @@ class _BaseRNNRecipe(TorchRecipe):
         return TorchArtifactPlan(
             source_kind="torch_module",
             input_signature=(
-                {"name": "window", "dtype": "float32", "shape": ("batch", features, 1)},
+                {"name": "window", "dtype": "float32", "shape": ("batch", features)},
             ),
             output_signature=(
                 {"name": "output", "dtype": "float32", "shape": ("batch", 1)},

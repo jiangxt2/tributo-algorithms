@@ -80,23 +80,12 @@ _POLICY = TorchPolicy(
         stages=(
             TorchStageSpec(
                 "pretrain",
-                "tributo.integrations.algorithm_runtimes.ray_train_torch:ray_torch_adapter_train_loop_per_worker",
                 ("train",),
-                metric_mapping={
-                    "pretrain_loss": "pretrain_loss",
-                    "train_loss": "train_loss",
-                },
             ),
             TorchStageSpec(
                 "finetune",
-                "tributo.integrations.algorithm_runtimes.ray_train_torch:ray_torch_adapter_train_loop_per_worker",
                 ("train",),
-                depends_on=("pretrain",),
                 checkpoint_from_stage="pretrain",
-                metric_mapping={
-                    "finetune_loss": "finetune_loss",
-                    "train_loss": "train_loss",
-                },
             ),
         ),
         final_stage_id="finetune",
@@ -108,8 +97,6 @@ _POLICY = TorchPolicy(
         "train_loss": MetricReduction.SUM_COUNT,
     },
     backend="auto",
-    resume_supported=False,
-    same_world_size_resume=None,
 )
 
 _CONTRACTS = ContractBindingSet(

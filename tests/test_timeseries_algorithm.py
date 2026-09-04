@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 
+import pytest
 import torch
 from tributo.algorithms import (
     DistributionStrategy,
@@ -18,7 +19,9 @@ from tributo_algorithms_timeseries import TEMPORAL_CONV_DESCRIPTOR
 from tributo_algorithms_timeseries.recipe import TemporalConvRecipe
 
 
-def _contexts() -> tuple[TorchBuildContext, TorchBatchContext, TorchStepContext]:
+def _contexts(
+    optimizer: dict[str, object] | None = None,
+) -> tuple[TorchBuildContext, TorchBatchContext, TorchStepContext]:
     policy = TEMPORAL_CONV_DESCRIPTOR.registration.distribution_spec.policy
     identity = TorchStageRunIdentity(
         "aabbccdd",
@@ -32,7 +35,12 @@ def _contexts() -> tuple[TorchBuildContext, TorchBatchContext, TorchStepContext]
         policy.execution_plan.digest,
     )
     runtime = TorchRuntimeContext(
-        {"model": {"input_features": 4}, "optimizer": {"accumulation_steps": 2}},
+        {
+            "model": {"input_features": 4},
+            "optimizer": (
+                {"accumulation_steps": 2} if optimizer is None else optimizer
+            ),
+        },
         "tcn",
         1,
         policy.digest,
@@ -43,7 +51,9 @@ def _contexts() -> tuple[TorchBuildContext, TorchBatchContext, TorchStepContext]
     stage = TorchStageContext(runtime, "train", 0, True, ("train",))
     return (
         TorchBuildContext(runtime, stage),
-        TorchBatchContext(stage, ("lag_3", "lag_2", "lag_1", "lag_0"), "label"),
+        TorchBatchContext(
+            stage, ("lag_3", "lag_2", "lag_1", "lag_0"), label_name="label"
+        ),
         TorchStepContext(stage, 0, 0),
     )
 
@@ -75,3 +85,20 @@ def test_temporal_recipe_returns_sum_count_loss() -> None:
     assert result.loss.normalizer == 2
     assert result.metrics["accuracy"].normalizer == 2
     assert recipe.configure_optimizers(modules, build).gradient_accumulation_steps == 2
+
+
+@pytest.mark.parametrize(
+    ("optimizer", "message"),
+    [
+        ({"accumulation_steps": 1.5}, "gradient_accumulation_steps"),
+        ({"max_gradient_norm": True}, "max_gradient_norm"),
+    ],
+)
+def test_temporal_recipe_preserves_optimizer_value_types(
+    optimizer: dict[str, object], message: str
+) -> None:
+    recipe = TemporalConvRecipe()
+    build, _, _ = _contexts(optimizer)
+    modules = recipe.build_modules(build)
+    with pytest.raises(ValueError, match=message):
+        recipe.configure_optimizers(modules, build)

@@ -117,16 +117,12 @@ def _policy(*, pu: bool) -> TorchPolicy:
         "execution_plan": SingleStageTorchPlan(
             stage=TorchStageSpec(
                 "train",
-                "tributo.integrations.algorithm_runtimes.ray_train_torch:torch_recipe_train_loop_per_worker",
                 ("train", "val", "test"),
-                metric_mapping={name: name for name in metrics},
             )
         ),
         "state_layout": "replicated",
         "metric_reducers": metrics,
         "backend": "auto",
-        "resume_supported": True,
-        "same_world_size_resume": True,
     }
     if pu:
         policy_kwargs.update(

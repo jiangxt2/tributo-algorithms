@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
+import math
 import tempfile
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -16,6 +16,7 @@ from tributo.algorithms.api import (
     AlgorithmExecutionError,
     TorchAccumulationWindow,
     TorchBackwardContext,
+    TorchCheckpointPayloadDraft,
     TorchCheckpointRef,
     TorchLossContribution,
     TorchMetricContribution,
@@ -36,6 +37,34 @@ from tributo.algorithms.spi import (
     TorchWorkerCheckpointContext,
 )
 from tributo.util.annotations import PublicAPI
+
+
+def _integer_tensor(
+    value: object,
+    field_name: str,
+    *,
+    device: Any = None,
+) -> Any:
+    import torch
+
+    tensor = torch.as_tensor(value, device=device)
+    if tensor.dtype == torch.bool or tensor.is_floating_point() or tensor.is_complex():
+        raise AlgorithmExecutionError(f"{field_name} must contain integer values")
+    return tensor.to(dtype=torch.long)
+
+
+def _gradient_clip_norm(training: Mapping[str, Any]) -> float:
+    value = training.get("max_gradient_norm", 1.0)
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(float(value))
+        or float(value) <= 0
+    ):
+        raise AlgorithmConfigurationError(
+            "training.max_gradient_norm must be positive and finite"
+        )
+    return float(value)
 
 
 def _model(*, user_count: int, item_count: int, embedding_dim: int) -> object:
@@ -61,10 +90,10 @@ def _model(*, user_count: int, item_count: int, embedding_dim: int) -> object:
             history_offsets: object,
             candidate_ids: object,
         ) -> object:
-            users = cast(torch.Tensor, user_ids).long()
-            values = cast(torch.Tensor, history_values).long()
-            offsets = cast(torch.Tensor, history_offsets).long()
-            candidates = cast(torch.Tensor, candidate_ids).long()
+            users = _integer_tensor(user_ids, "jagged user IDs")
+            values = _integer_tensor(history_values, "jagged history item IDs")
+            offsets = _integer_tensor(history_offsets, "jagged history offsets")
+            candidates = _integer_tensor(candidate_ids, "jagged candidate item IDs")
             return (
                 self.user_embedding(users) + self.history_embedding(values, offsets)
             ).mul(self.candidate_embedding(candidates)).sum(
@@ -90,9 +119,9 @@ def _padded_inference_model(model: object) -> object:
         def forward(
             self, user_ids: object, item_history: object, candidate_ids: object
         ) -> object:
-            users = cast(torch.Tensor, user_ids).long()
-            history = cast(torch.Tensor, item_history).long()
-            candidates = cast(torch.Tensor, candidate_ids).long()
+            users = _integer_tensor(user_ids, "jagged user IDs")
+            history = _integer_tensor(item_history, "jagged history item IDs")
+            candidates = _integer_tensor(candidate_ids, "jagged candidate item IDs")
             user_count = self.user_embedding.num_embeddings
             item_count = self.candidate_embedding.num_embeddings
             user_valid = users.ge(0).logical_and(users.lt(user_count))
@@ -164,7 +193,12 @@ def _jagged_tensors(
             raise AlgorithmExecutionError(
                 "jagged histories must be non-empty sequences"
             )
-        history = [int(value) for value in values]
+        history_tensor = _integer_tensor(values, "jagged history item IDs")
+        if history_tensor.ndim != 1:
+            raise AlgorithmExecutionError(
+                "jagged histories must be one-dimensional sequences"
+            )
+        history = [int(value) for value in history_tensor.tolist()]
         if any(value < 0 or value >= item_count for value in history):
             raise AlgorithmExecutionError("jagged history item ID is out of range")
         histories.append(history)
@@ -175,13 +209,15 @@ def _jagged_tensors(
     for history in histories:
         offsets.append(len(flattened))
         flattened.extend(history)
-    user_ids = torch.as_tensor(
-        data[user_col].to_numpy(copy=True), dtype=torch.long, device=device
+    user_ids = _integer_tensor(
+        data[user_col].to_numpy(copy=True), "jagged user IDs", device=device
     )
     history_values = torch.as_tensor(flattened, dtype=torch.long, device=device)
     history_offsets = torch.as_tensor(offsets, dtype=torch.long, device=device)
-    candidate_ids = torch.as_tensor(
-        data[candidate_col].to_numpy(copy=True), dtype=torch.long, device=device
+    candidate_ids = _integer_tensor(
+        data[candidate_col].to_numpy(copy=True),
+        "jagged candidate item IDs",
+        device=device,
     )
     labels = torch.as_tensor(
         data[label_col].to_numpy(copy=True), dtype=torch.float32, device=device
@@ -242,60 +278,6 @@ def _route_sparse_keys(values: object, *, rank: int, world_size: int) -> int:
     return int(received.numel())
 
 
-def _load_retry_state(
-    checkpoint_context: TorchWorkerCheckpointContext,
-    model: object,
-    optimizer: object,
-    *,
-    rank: int,
-) -> int:
-    if checkpoint_context.checkpoint is None:
-        return 0
-    if checkpoint_context.source != "ray_failure_retry":
-        raise AlgorithmExecutionError(
-            "jagged adapter accepts only Ray failure retry Checkpoints"
-        )
-    import torch
-
-    opener = getattr(checkpoint_context.checkpoint.checkpoint, "as_directory", None)
-    if not callable(opener):
-        raise AlgorithmExecutionError("jagged retry checkpoint cannot be opened")
-    with opener() as directory:
-        root = Path(directory)
-        model_path = root / "model.pt"
-        optimizer_path = root / "optimizer.pt"
-        if not model_path.is_file() or not optimizer_path.is_file():
-            raise AlgorithmExecutionError(
-                "jagged retry checkpoint is missing model/optimizer state"
-            )
-        target_model = cast(torch.nn.Module, getattr(model, "module", model))
-        target_model.load_state_dict(
-            torch.load(model_path, map_location="cpu", weights_only=True)
-        )
-        cast(Any, optimizer).load_state_dict(
-            torch.load(optimizer_path, map_location="cpu", weights_only=True)
-        )
-        rng_path = root / "rng_state.pt"
-        if rng_path.is_file():
-            payload = torch.load(rng_path, map_location="cpu", weights_only=True)
-            states = payload.get("states") if isinstance(payload, Mapping) else None
-            raw_state = (
-                states[rank]
-                if isinstance(states, list) and rank < len(states)
-                else payload
-            )
-            if isinstance(raw_state, bytes):
-                torch.set_rng_state(
-                    torch.frombuffer(bytearray(raw_state), dtype=torch.uint8).clone()
-                )
-            elif isinstance(raw_state, torch.Tensor):
-                torch.set_rng_state(raw_state.to(dtype=torch.uint8).cpu())
-            else:
-                raise AlgorithmExecutionError("jagged retry RNG state is malformed")
-    descriptor = checkpoint_context.checkpoint.descriptor
-    return int(descriptor.completed_step) if descriptor is not None else 0
-
-
 def _train_loop(
     config: Mapping[str, Any], checkpoint_context: TorchWorkerCheckpointContext
 ) -> None:
@@ -304,7 +286,6 @@ def _train_loop(
     import torch
     import torch.distributed as dist
     from ray import train
-    from ray.train import Checkpoint
     from ray.train.torch import get_device, prepare_model
 
     shard = train.get_dataset_shard("train")
@@ -362,7 +343,11 @@ def _train_loop(
     optimizer = torch.optim.Adam(
         model.parameters(), lr=float(training.get("learning_rate", 0.01))
     )
-    restored_step = _load_retry_state(checkpoint_context, model, optimizer, rank=rank)
+    max_gradient_norm = _gradient_clip_norm(training)
+    if checkpoint_context.source != "none" or checkpoint_context.checkpoint is not None:
+        raise AlgorithmExecutionError(
+            "jagged Stage does not accept an input Checkpoint"
+        )
     logits = model(user_ids, history_values, history_offsets, candidate_ids)
     numerator = torch.nn.functional.binary_cross_entropy_with_logits(
         logits, labels, reduction="sum"
@@ -379,9 +364,7 @@ def _train_loop(
         for parameter in model.parameters():
             if parameter.grad is not None:
                 parameter.grad.mul_(scale)
-        torch.nn.utils.clip_grad_norm_(
-            model.parameters(), float(training.get("max_gradient_norm", 1.0))
-        )
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_gradient_norm)
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
 
@@ -445,14 +428,6 @@ def _train_loop(
     with tempfile.TemporaryDirectory(prefix="tributo-jagged-") as directory:
         root = Path(directory)
         torch.save(dict(state), root / "model.pt")
-        torch.save(optimizer.state_dict(), root / "optimizer.pt")
-        rng_state = torch.get_rng_state().cpu().numpy().tobytes()
-        rng_states: list[object] = [rng_state] * world_size
-        if dist.is_initialized():
-            dist.all_gather_object(rng_states, rng_state)
-        torch.save(
-            {"world_size": world_size, "states": rng_states}, root / "rng_state.pt"
-        )
         (root / "model_config.json").write_text(
             json.dumps(
                 {"model": dict(model_config), "data": dict(data_config)}, sort_keys=True
@@ -460,29 +435,15 @@ def _train_loop(
             encoding="utf-8",
         )
 
-        class Draft:
-            checkpoint_dir: str | os.PathLike[str] = str(root)
-
-            def report(
-                self,
-                *,
-                metrics: Mapping[str, object],
-                stage_context: object,
-                completed_step: int,
-            ) -> None:
-                del stage_context, completed_step
-                checkpoint = Checkpoint.from_directory(str(root)) if rank == 0 else None
-                train.report(dict(metrics), checkpoint=checkpoint)
-
         report_torch_checkpoint(
             {
                 "train_loss": train_loss,
                 "execution_workers": workers,
                 "model_state_digest": model_digest,
             },
-            Draft(),
+            TorchCheckpointPayloadDraft(root),
             checkpoint_context.stage,
-            restored_step + 1,
+            1,
         )
 
 

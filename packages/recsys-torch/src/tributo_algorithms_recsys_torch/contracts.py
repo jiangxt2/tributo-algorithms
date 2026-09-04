@@ -43,17 +43,36 @@ class PairInputValidator:
 
     def validate(self, value: Mapping[str, Any]) -> Mapping[str, Any]:
         bindings = value.get("bindings")
-        if not isinstance(bindings, list) or len(bindings) != 1:
-            raise ValueError("Two-Tower requires one interaction binding")
-        binding = bindings[0]
+        if not isinstance(bindings, list) or not 1 <= len(bindings) <= 3:
+            raise ValueError("Two-Tower requires train and optional val/test bindings")
+        if any(not isinstance(binding, Mapping) for binding in bindings):
+            raise ValueError("Two-Tower bindings must be mappings")
+        names = [binding.get("name") for binding in bindings]
+        if any(not isinstance(name, str) for name in names):
+            raise ValueError("Two-Tower input roles must be named")
+        by_role = {str(binding["name"]): binding for binding in bindings}
         if (
-            not isinstance(binding, Mapping)
-            or binding.get("role", "train") != "train"
-            or len(binding.get("feature_names", ())) != 2
-            or not binding.get("label_name")
-            or binding.get("sample_weight_name") is not None
+            len(by_role) != len(bindings)
+            or "train" not in by_role
+            or not set(by_role).issubset({"train", "val", "test"})
+            or value.get("primary_role") != "train"
         ):
-            raise ValueError("Two-Tower requires user ID, item ID, and label columns")
+            raise ValueError("Two-Tower input roles are invalid")
+        train = by_role["train"]
+        expected_features = train.get("feature_names")
+        expected_label = train.get("label_name")
+        for binding in by_role.values():
+            if (
+                binding.get("feature_names") != expected_features
+                or not isinstance(expected_features, list)
+                or len(expected_features) != 2
+                or binding.get("label_name") != expected_label
+                or not isinstance(expected_label, str)
+                or binding.get("sample_weight_name") is not None
+            ):
+                raise ValueError(
+                    "Two-Tower requires consistent user ID, item ID, and label columns"
+                )
         return value
 
 
@@ -224,7 +243,7 @@ class JaggedCoverageValidator:
 
 class JaggedTorchInputValidator(JaggedInputValidator):
     api_version = 1
-    schema_digest = _digest("jagged-input")
+    schema_digest = _digest("jagged-input-role-named")
 
     def validate(self, value: Mapping[str, Any]) -> Mapping[str, Any]:
         validated = super().validate(value)
@@ -232,7 +251,7 @@ class JaggedTorchInputValidator(JaggedInputValidator):
         binding = bindings[0] if isinstance(bindings, list) else None
         if (
             not isinstance(binding, Mapping)
-            or binding.get("role", "train") != "train"
+            or binding.get("name") != "train"
             or binding.get("sample_weight_name") is not None
             or not all(
                 isinstance(name, str) and name
@@ -252,7 +271,7 @@ class JaggedTorchCoverageValidator(JaggedCoverageValidator):
 
 class TwoTowerTensorInputValidator(PairInputValidator):
     api_version = 1
-    schema_digest = _digest("two-tower-input")
+    schema_digest = _digest("two-tower-input-role-routed")
 
 
 class TwoTowerTorchCoverageValidator(PairCoverageValidator):

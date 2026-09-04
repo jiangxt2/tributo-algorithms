@@ -26,8 +26,10 @@ class TabularTorchConfigValidator:
             if item is not None and not isinstance(item, Mapping):
                 raise ValueError(f"{name} must be a mapping")
         output = normalized.get("output")
-        if not isinstance(output, Mapping) or not isinstance(
-            output.get("bundle_uri"), str
+        if (
+            not isinstance(output, Mapping)
+            or not isinstance(output.get("bundle_uri"), str)
+            or not output["bundle_uri"]
         ):
             raise ValueError("output.bundle_uri is required")
         optimizer = normalized.get("optimizer", {})
@@ -99,32 +101,53 @@ class PUConfigValidator(TabularTorchConfigValidator):
 
 class DNNTensorInputValidator:
     api_version = 1
-    schema_digest = _digest("dnn-named-input")
+    schema_digest = _digest("dnn-named-input-role-routed")
 
     def validate(self, value: Mapping[str, Any]) -> Mapping[str, Any]:
         bindings = value.get("bindings")
-        if not isinstance(bindings, list) or len(bindings) != 1:
-            raise ValueError("tabular-torch requires one train binding")
-        binding = bindings[0]
-        if not isinstance(binding, Mapping) or binding.get("role", "train") != "train":
-            raise ValueError("tabular-torch requires a train binding")
-        features = binding.get("feature_names")
+        if not isinstance(bindings, list) or not 1 <= len(bindings) <= 3:
+            raise ValueError(
+                "tabular-torch requires train and optional val/test bindings"
+            )
+        if any(not isinstance(binding, Mapping) for binding in bindings):
+            raise ValueError("tabular-torch bindings must be mappings")
+        names = [binding.get("name") for binding in bindings]
+        if any(not isinstance(name, str) for name in names):
+            raise ValueError("tabular-torch input roles must be named")
+        by_role = {str(binding["name"]): binding for binding in bindings}
         if (
-            not isinstance(features, list)
-            or not features
-            or any(not isinstance(name, str) or not name for name in features)
+            len(by_role) != len(bindings)
+            or "train" not in by_role
+            or not set(by_role).issubset({"train", "val", "test"})
+            or value.get("primary_role") != "train"
         ):
-            raise ValueError("tabular-torch requires named dense features")
-        if not isinstance(binding.get("label_name"), str) or not binding["label_name"]:
-            raise ValueError("tabular-torch requires one label")
-        if binding.get("sample_weight_name") is not None:
-            raise ValueError("tabular-torch does not support sample-weight binding")
+            raise ValueError("tabular-torch input roles are invalid")
+        train = by_role["train"]
+        expected_features = train.get("feature_names")
+        expected_label = train.get("label_name")
+        for binding in by_role.values():
+            features = binding.get("feature_names")
+            if (
+                not isinstance(features, list)
+                or not features
+                or any(not isinstance(name, str) or not name for name in features)
+                or features != expected_features
+            ):
+                raise ValueError(
+                    "tabular-torch requires consistent named dense features"
+                )
+            if binding.get("label_name") != expected_label or not isinstance(
+                expected_label, str
+            ):
+                raise ValueError("tabular-torch requires one consistent label")
+            if binding.get("sample_weight_name") is not None:
+                raise ValueError("tabular-torch does not support sample-weight binding")
         return value
 
 
 class PUTensorInputValidator(DNNTensorInputValidator):
     api_version = 1
-    schema_digest = _digest("pu-named-input")
+    schema_digest = _digest("pu-named-input-role-routed")
 
 
 class DNNTorchBundleOutputValidator:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
+import math
 import tempfile
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -16,6 +16,7 @@ from tributo.algorithms.api import (
     AlgorithmExecutionError,
     TorchAccumulationWindow,
     TorchBackwardContext,
+    TorchCheckpointPayloadDraft,
     TorchCheckpointRef,
     TorchLossContribution,
     TorchMetricContribution,
@@ -36,6 +37,20 @@ from tributo.algorithms.spi import (
     TorchWorkerCheckpointContext,
 )
 from tributo.util.annotations import PublicAPI
+
+
+def _gradient_clip_norm(training: Mapping[str, Any]) -> float:
+    value = training.get("max_gradient_norm", 1.0)
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(float(value))
+        or float(value) <= 0
+    ):
+        raise AlgorithmConfigurationError(
+            "training.max_gradient_norm must be positive and finite"
+        )
+    return float(value)
 
 
 def _model(input_features: int, hidden: int) -> object:
@@ -59,62 +74,6 @@ def _state_digest(state: Mapping[str, object]) -> str:
         digest.update(str(tuple(tensor.shape)).encode())
         digest.update(tensor.numpy().tobytes())
     return digest.hexdigest()
-
-
-def _load_retry_state(
-    checkpoint_context: TorchWorkerCheckpointContext,
-    model: object,
-    optimizer: object,
-    *,
-    rank: int,
-) -> int:
-    if checkpoint_context.checkpoint is None:
-        return 0
-    if checkpoint_context.source != "ray_failure_retry":
-        raise AlgorithmExecutionError(
-            "distillation adapter accepts only Ray failure retry Checkpoints"
-        )
-    import torch
-
-    opener = getattr(checkpoint_context.checkpoint.checkpoint, "as_directory", None)
-    if not callable(opener):
-        raise AlgorithmExecutionError("distillation retry checkpoint cannot be opened")
-    with opener() as directory:
-        root = Path(directory)
-        model_path = root / "model.pt"
-        optimizer_path = root / "optimizer.pt"
-        if not model_path.is_file() or not optimizer_path.is_file():
-            raise AlgorithmExecutionError(
-                "distillation retry checkpoint is missing model/optimizer state"
-            )
-        target_model = cast(torch.nn.Module, getattr(model, "module", model))
-        target_model.load_state_dict(
-            torch.load(model_path, map_location="cpu", weights_only=True)
-        )
-        cast(Any, optimizer).load_state_dict(
-            torch.load(optimizer_path, map_location="cpu", weights_only=True)
-        )
-        rng_path = root / "rng_state.pt"
-        if rng_path.is_file():
-            payload = torch.load(rng_path, map_location="cpu", weights_only=True)
-            states = payload.get("states") if isinstance(payload, Mapping) else None
-            raw_state = (
-                states[rank]
-                if isinstance(states, list) and rank < len(states)
-                else payload
-            )
-            if isinstance(raw_state, bytes):
-                torch.set_rng_state(
-                    torch.frombuffer(bytearray(raw_state), dtype=torch.uint8).clone()
-                )
-            elif isinstance(raw_state, torch.Tensor):
-                torch.set_rng_state(raw_state.to(dtype=torch.uint8).cpu())
-            else:
-                raise AlgorithmExecutionError(
-                    "distillation retry RNG state is malformed"
-                )
-    descriptor = checkpoint_context.checkpoint.descriptor
-    return int(descriptor.completed_step) if descriptor is not None else 0
 
 
 def _load_teacher_checkpoint(
@@ -143,7 +102,6 @@ def _stage_train_loop(
     import torch
     import torch.distributed as dist
     from ray import train
-    from ray.train import Checkpoint
     from ray.train.torch import get_device, prepare_model
 
     stage = str(config.get("stage", "teacher"))
@@ -214,7 +172,7 @@ def _stage_train_loop(
     optimizer = torch.optim.Adam(
         model.parameters(), lr=float(training.get("learning_rate", 0.01))
     )
-    restored_step = 0
+    max_gradient_norm = _gradient_clip_norm(training)
     if checkpoint_context.checkpoint is not None:
         if checkpoint_context.source == "stage_dependency":
             if stage != "student" or teacher is None:
@@ -222,27 +180,6 @@ def _stage_train_loop(
                     "distillation stage dependency targets only the student stage"
                 )
             _load_teacher_checkpoint(checkpoint_context, teacher)
-        elif checkpoint_context.source == "ray_failure_retry":
-            restored_step = _load_retry_state(
-                checkpoint_context, model, optimizer, rank=rank
-            )
-            if stage == "student" and teacher is not None:
-                opener = getattr(
-                    checkpoint_context.checkpoint.checkpoint, "as_directory", None
-                )
-                if not callable(opener):
-                    raise AlgorithmExecutionError(
-                        "distillation retry checkpoint cannot be opened"
-                    )
-                with opener() as directory:
-                    teacher_path = Path(directory) / "teacher.pt"
-                    if not teacher_path.is_file():
-                        raise AlgorithmExecutionError(
-                            "distillation retry checkpoint is missing teacher.pt"
-                        )
-                    teacher.load_state_dict(
-                        torch.load(teacher_path, map_location=device, weights_only=True)
-                    )
         else:
             raise AlgorithmExecutionError(
                 f"distillation checkpoint source {checkpoint_context.source!r} is invalid"
@@ -257,10 +194,9 @@ def _stage_train_loop(
         raise AlgorithmConfigurationError(
             "distillation supervised_weight must be in [0, 1]"
         )
-    start_epoch = min(restored_step, epochs)
     last_numerator = 0.0
     last_rows = 0
-    for epoch in range(start_epoch, epochs):
+    for epoch in range(epochs):
         optimizer.zero_grad(set_to_none=True)
         numerator_total: torch.Tensor | None = None
         rows = 0
@@ -300,9 +236,7 @@ def _stage_train_loop(
             for parameter in model.parameters():
                 if parameter.grad is not None:
                     parameter.grad.mul_(scale)
-            torch.nn.utils.clip_grad_norm_(
-                model.parameters(), float(training.get("max_gradient_norm", 1.0))
-            )
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_gradient_norm)
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
 
@@ -348,8 +282,8 @@ def _stage_train_loop(
         "shard_id": f"{stage}-{rank}",
         "rows_processed": last_rows,
         "input_rows": {"train": last_rows},
-        "batch_count": max(epochs - start_epoch, 0),
-        "collective_steps": max(epochs - start_epoch, 0),
+        "batch_count": epochs,
+        "collective_steps": epochs,
         "model_state_digest": digest,
         "stage": stage,
     }
@@ -363,16 +297,6 @@ def _stage_train_loop(
     ) as directory:
         root = Path(directory)
         torch.save(unwrapped.state_dict(), root / "model.pt")
-        torch.save(optimizer.state_dict(), root / "optimizer.pt")
-        if teacher is not None:
-            torch.save(teacher.state_dict(), root / "teacher.pt")
-        rng_state = torch.get_rng_state().cpu().numpy().tobytes()
-        rng_states: list[object] = [rng_state] * world_size
-        if dist.is_initialized():
-            dist.all_gather_object(rng_states, rng_state)
-        torch.save(
-            {"world_size": world_size, "states": rng_states}, root / "rng_state.pt"
-        )
         (root / "model_config.json").write_text(
             json.dumps(
                 {
@@ -387,29 +311,14 @@ def _stage_train_loop(
             encoding="utf-8",
         )
 
-        class Draft:
-            checkpoint_dir: str | os.PathLike[str] = str(root)
-
-            def report(
-                self,
-                *,
-                metrics: Mapping[str, object],
-                stage_context: object,
-                completed_step: int,
-            ) -> None:
-                del stage_context, completed_step
-                checkpoint = Checkpoint.from_directory(str(root)) if rank == 0 else None
-                train.report(dict(metrics), checkpoint=checkpoint)
-
         report_torch_checkpoint(
             {
-                "stage": stage,
                 "train_loss": reduced_loss,
                 f"{stage}_loss": reduced_loss,
                 "execution_workers": workers,
                 "model_state_digest": digest,
             },
-            Draft(),
+            TorchCheckpointPayloadDraft(root),
             checkpoint_context.stage,
             epochs,
         )

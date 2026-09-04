@@ -13,12 +13,11 @@ from tributo.algorithms import (
     RayTorchAdapter,
     TorchCheckpointRef,
 )
-from tributo.algorithms.api import AlgorithmExecutionError
+from tributo.algorithms.api import AlgorithmConfigurationError, AlgorithmExecutionError
 from tributo.algorithms.spi import (
     TorchArtifactContext,
     TorchRuntimeContext,
     TorchStageContext,
-    TorchWorkerCheckpointContext,
 )
 from tributo_algorithms_recsys_torch import (
     JAGGED_DESCRIPTOR,
@@ -30,8 +29,8 @@ from tributo_algorithms_recsys_torch.contracts import (
     JaggedTorchInputValidator,
 )
 from tributo_algorithms_recsys_torch.jagged import (
+    _gradient_clip_norm,
     _jagged_tensors,
-    _load_retry_state,
     _model,
     _padded_inference_model,
     _state_digest,
@@ -64,6 +63,33 @@ def test_jagged_batch_builds_embedding_bag_offsets() -> None:
     assert values.tolist() == [1, 2, 2]
     assert offsets.tolist() == [0, 2]
     assert token_count == 3
+
+
+@pytest.mark.parametrize(
+    "columns",
+    [
+        {"user": [0.5], "history": [[1]], "item": [2], "label": [1.0]},
+        {"user": [0], "history": [[1.5]], "item": [2], "label": [1.0]},
+        {"user": [0], "history": [[1]], "item": [True], "label": [1.0]},
+    ],
+)
+def test_jagged_rejects_non_integer_ids(columns: dict[str, list[object]]) -> None:
+    with pytest.raises(AlgorithmExecutionError, match="integer values"):
+        _jagged_tensors(
+            pd.DataFrame(columns),
+            user_col="user",
+            history_col="history",
+            candidate_col="item",
+            label_col="label",
+            item_count=8,
+            device=torch.device("cpu"),
+        )
+
+
+@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf")])
+def test_jagged_rejects_invalid_gradient_clip_norm(value: float) -> None:
+    with pytest.raises(AlgorithmConfigurationError, match="positive and finite"):
+        _gradient_clip_norm({"max_gradient_norm": value})
 
 
 def test_padded_jagged_model_emits_validity_column() -> None:
@@ -105,7 +131,7 @@ def test_jagged_v2_input_rejects_sample_weights() -> None:
             {
                 "bindings": [
                     {
-                        "role": "train",
+                        "name": "train",
                         "feature_names": ["user_id", "item_history", "item_id"],
                         "label_name": "label",
                         "sample_weight_name": "weight",
@@ -213,61 +239,3 @@ def test_jagged_checkpoint_source_requires_a_checkpoint() -> None:
         DistributedJaggedEmbedding().checkpoint_source(
             type("Result", (), {})(), object()
         )
-
-
-def test_jagged_retry_checkpoint_requires_optimizer_state(tmp_path) -> None:
-    class Checkpoint:
-        @contextmanager
-        def as_directory(self):
-            yield str(tmp_path)
-
-    runtime = TorchRuntimeContext({}, "example.jagged", 1, "a" * 64, "b" * 64)
-    stage = TorchStageContext(runtime, "train", 0, True, ("train",))
-    context = TorchWorkerCheckpointContext(
-        stage, "ray_failure_retry", TorchCheckpointRef(Checkpoint())
-    )
-    model = _model(user_count=4, item_count=8, embedding_dim=3)
-    optimizer = torch.optim.Adam(model.parameters())
-    torch.save(model.state_dict(), tmp_path / "model.pt")
-    with pytest.raises(AlgorithmExecutionError, match="model/optimizer state"):
-        _load_retry_state(context, model, optimizer, rank=0)
-
-
-def test_jagged_retry_checkpoint_restores_optimizer_and_rng_state(tmp_path) -> None:
-    class Checkpoint:
-        @contextmanager
-        def as_directory(self):
-            yield str(tmp_path)
-
-    runtime = TorchRuntimeContext({}, "example.jagged", 1, "a" * 64, "b" * 64)
-    stage = TorchStageContext(runtime, "train", 0, True, ("train",))
-    context = TorchWorkerCheckpointContext(
-        stage, "ray_failure_retry", TorchCheckpointRef(Checkpoint())
-    )
-    torch.manual_seed(23)
-    saved_model = _model(user_count=4, item_count=8, embedding_dim=3)
-    saved_optimizer = torch.optim.Adam(saved_model.parameters())
-    sum(parameter.square().sum() for parameter in saved_model.parameters()).backward()
-    saved_optimizer.step()
-    expected_state = {
-        name: value.detach().clone() for name, value in saved_model.state_dict().items()
-    }
-    expected_rng = torch.get_rng_state().clone()
-    torch.save(saved_model.state_dict(), tmp_path / "model.pt")
-    torch.save(saved_optimizer.state_dict(), tmp_path / "optimizer.pt")
-    torch.save({"states": [expected_rng.numpy().tobytes()]}, tmp_path / "rng_state.pt")
-
-    target_model = _model(user_count=4, item_count=8, embedding_dim=3)
-    target_optimizer = torch.optim.Adam(target_model.parameters())
-    torch.manual_seed(99)
-    assert _load_retry_state(context, target_model, target_optimizer, rank=0) == 0
-    for name, value in target_model.state_dict().items():
-        torch.testing.assert_close(value, expected_state[name])
-    assert target_optimizer.state_dict()["state"]
-    torch.testing.assert_close(torch.get_rng_state(), expected_rng)
-
-    wrong_source = TorchWorkerCheckpointContext(
-        stage, "stage_dependency", TorchCheckpointRef(Checkpoint())
-    )
-    with pytest.raises(AlgorithmExecutionError, match="only Ray failure retry"):
-        _load_retry_state(wrong_source, target_model, target_optimizer, rank=0)

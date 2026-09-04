@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import cast
+from typing import Any, cast
 
 from tributo.algorithms.api.torch_runtime import (
     TorchLossContribution,
@@ -23,6 +23,15 @@ from tributo.algorithms.spi import (
     TorchStepContext,
     TorchStepResult,
 )
+
+
+def _integer_tensor(value: object, field_name: str) -> Any:
+    import torch
+
+    tensor = torch.as_tensor(value)
+    if tensor.dtype == torch.bool or tensor.is_floating_point() or tensor.is_complex():
+        raise ValueError(f"{field_name} must contain integer values")
+    return tensor.to(dtype=torch.int64)
 
 
 def _model(
@@ -89,10 +98,13 @@ def _batch(batch: object, context: TorchBatchContext) -> TorchBatch:
     if context.weight_name is not None:
         raise ValueError("Transformer does not support sample-weight binding")
     if len(feature_names) == 1 and feature_names[0] == "input_ids":
-        tokens = torch.as_tensor(batch[feature_names[0]], dtype=torch.int64)
+        tokens = _integer_tensor(batch[feature_names[0]], "Transformer token IDs")
     else:
         tokens = torch.stack(
-            [torch.as_tensor(batch[name], dtype=torch.int64) for name in feature_names],
+            [
+                _integer_tensor(batch[name], "Transformer token IDs")
+                for name in feature_names
+            ],
             dim=1,
         )
     targets = torch.as_tensor(batch[label_name], dtype=torch.float32).reshape(-1, 1)
@@ -107,7 +119,6 @@ def _batch(batch: object, context: TorchBatchContext) -> TorchBatch:
         keyword={"input_ids": tokens},
         targets=targets,
         local_rows=rows,
-        coverage_counts={"train": rows},
     )
 
 
@@ -162,7 +173,6 @@ class TokenTransformerRecipe(TorchRecipe):
         return TorchStepResult(
             outputs={"output": predictions},
             loss=TorchLossContribution(numerator, batch.local_rows),
-            coverage_counts=dict(batch.coverage_counts),
             metrics={"accuracy": _accuracy(predictions, targets)},
         )
 
@@ -185,8 +195,8 @@ class TokenTransformerRecipe(TorchRecipe):
                 lr=float(config.get("learning_rate", 0.001)),
                 weight_decay=float(config.get("weight_decay", 0.0)),
             ),
-            gradient_accumulation_steps=int(config.get("accumulation_steps", 1)),
-            max_gradient_norm=float(config.get("max_gradient_norm", 1.0)),
+            gradient_accumulation_steps=config.get("accumulation_steps", 1),
+            max_gradient_norm=config.get("max_gradient_norm", 1.0),
         )
 
     def metric_plan(self, context: TorchRuntimeContext) -> TorchMetricPlan:

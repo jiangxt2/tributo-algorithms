@@ -46,7 +46,6 @@ def _batch(batch: object, context: TorchBatchContext) -> TorchBatch:
         keyword={"features": features},
         targets=features,
         local_rows=rows,
-        coverage_counts={"train": rows},
     )
 
 
@@ -95,7 +94,6 @@ class TabularAutoencoderRecipe(TorchRecipe):
         return TorchStepResult(
             outputs={"output": reconstruction},
             loss=TorchLossContribution(numerator, element_count),
-            coverage_counts=dict(batch.coverage_counts),
             metrics={
                 "reconstruction_mse": TorchMetricContribution(
                     float(numerator.detach().item()), element_count
@@ -122,10 +120,8 @@ class TabularAutoencoderRecipe(TorchRecipe):
                 lr=float(optimizer_config.get("learning_rate", 0.01)),
                 weight_decay=float(optimizer_config.get("weight_decay", 0.0)),
             ),
-            gradient_accumulation_steps=int(
-                optimizer_config.get("accumulation_steps", 1)
-            ),
-            max_gradient_norm=float(optimizer_config.get("max_gradient_norm", 1.0)),
+            gradient_accumulation_steps=optimizer_config.get("accumulation_steps", 1),
+            max_gradient_norm=optimizer_config.get("max_gradient_norm", 1.0),
         )
 
     def metric_plan(self, context: TorchRuntimeContext) -> TorchMetricPlan:

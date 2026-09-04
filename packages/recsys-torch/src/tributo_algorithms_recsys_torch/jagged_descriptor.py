@@ -80,16 +80,12 @@ _POLICY = TorchPolicy(
     execution_plan=SingleStageTorchPlan(
         stage=TorchStageSpec(
             "train",
-            "tributo.integrations.algorithm_runtimes.ray_train_torch:ray_torch_adapter_train_loop_per_worker",
             ("train",),
-            metric_mapping={"train_loss": "train_loss"},
         )
     ),
     state_layout="replicated",
     metric_reducers={"train_loss": MetricReduction.SUM_COUNT},
     backend="auto",
-    resume_supported=False,
-    same_world_size_resume=None,
 )
 
 _CONTRACTS = ContractBindingSet(

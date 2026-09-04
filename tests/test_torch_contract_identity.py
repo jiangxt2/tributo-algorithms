@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from tributo_algorithms_graph_pyg import GRAPHSAGE_DESCRIPTOR, RGCN_DESCRIPTOR
 from tributo_algorithms_graph_pyg.contracts import (
@@ -25,33 +27,74 @@ from tributo_algorithms_recsys_torch.contracts import (
     JaggedOutputValidator,
     TwoTowerConfigValidator,
     TwoTowerOutputValidator,
+    TwoTowerTensorInputValidator,
 )
 from tributo_algorithms_representation import TABULAR_AUTOENCODER_DESCRIPTOR
 from tributo_algorithms_representation.contracts import (
+    AutoencoderTensorInputValidator,
     RepresentationConfigValidator,
     RepresentationOutputValidator,
 )
 from tributo_algorithms_tabular_torch import DNN_DESCRIPTOR, PU_DESCRIPTOR
 from tributo_algorithms_tabular_torch.contracts import (
+    DNNTensorInputValidator,
     DNNTorchBundleOutputValidator,
+    PUTensorInputValidator,
     PUTorchBundleOutputValidator,
     TabularTorchConfigValidator,
 )
 from tributo_algorithms_timeseries import TEMPORAL_CONV_DESCRIPTOR
 from tributo_algorithms_timeseries.contracts import (
+    TemporalConvTensorInputValidator,
     TimeSeriesConfigValidator,
     TimeSeriesOutputValidator,
 )
 from tributo_algorithms_timeseries.rnn_contracts import (
+    GRUTensorInputValidator,
+    LSTMTensorInputValidator,
     RNNConfigValidator,
     RNNOutputValidator,
 )
 from tributo_algorithms_timeseries.rnn_descriptor import GRU_DESCRIPTOR, LSTM_DESCRIPTOR
 from tributo_algorithms_transformers_nlp import TOKEN_TRANSFORMER_DESCRIPTOR
 from tributo_algorithms_transformers_nlp.contracts import (
+    TokenTensorInputValidator,
     TransformerConfigValidator,
     TransformerOutputValidator,
 )
+
+
+@pytest.mark.parametrize(
+    ("validator", "features", "label"),
+    (
+        (DNNTensorInputValidator, ["x0", "x1"], "label"),
+        (PUTensorInputValidator, ["x0", "x1"], "label"),
+        (TemporalConvTensorInputValidator, ["lag_1", "lag_0"], "label"),
+        (LSTMTensorInputValidator, ["lag_1", "lag_0"], "label"),
+        (GRUTensorInputValidator, ["lag_1", "lag_0"], "label"),
+        (AutoencoderTensorInputValidator, ["x0", "x1"], None),
+        (TokenTensorInputValidator, ["token_0", "token_1"], "label"),
+        (TwoTowerTensorInputValidator, ["user_id", "item_id"], "label"),
+    ),
+)
+def test_recipe_input_contracts_accept_matching_optional_evaluation_roles(
+    validator: type[Any], features: list[str], label: str | None
+) -> None:
+    bindings = [
+        {
+            "name": role,
+            "feature_names": list(features),
+            "label_name": label,
+            "sample_weight_name": None,
+        }
+        for role in ("train", "val", "test")
+    ]
+    value = {"primary_role": "train", "bindings": bindings, "descriptors": {}}
+    assert validator().validate(value) == value
+
+    bindings[1] = {**bindings[1], "feature_names": [*features, "drift"]}
+    with pytest.raises(ValueError):
+        validator().validate(value)
 
 
 def test_all_torch_output_contracts_reject_incomplete_results() -> None:
@@ -267,33 +310,33 @@ def test_all_torch_descriptors_freeze_contract_identity() -> None:
         "DistillationOutputValidator": "c" * 64,
         "PretrainFinetuneConfigValidator": "e" * 64,
         "PretrainFinetuneOutputValidator": "0" * 64,
-        "DNNTensorInputValidator": "0c4d416d22292f7b51c4919ab96e4f890c9a588f6f510d31a439eab4abfe39f8",
+        "DNNTensorInputValidator": "38e53672a698d960b3e4bd221b7712190f330f90468f5e4d60c5adeb0642e80c",
         "DNNTorchBundleOutputValidator": "785f9b729a9d7b33900b4f15f4441de656fb52f7c3420afc1d6021172e01302f",
         "DNNTorchCoverageValidator": "a195d09564fff453deafa2e1911a1b3cd998d61c7d20af7cf2667b8fc753c238",
-        "PUTensorInputValidator": "be2e3a50d5edb882feb4cf96752c814dbe2be02adf72e87b51ed8e0f1240ea8f",
+        "PUTensorInputValidator": "3dfe33eca244df5644f23d02dbc61d989fefff0a4f5e05d1d094260ab1e28aad",
         "PUTorchBundleOutputValidator": "1b6398112fe11485ee6474278e2a66381da6ba5a463fe54c9c70181f4d0fadb1",
         "PUCoverageValidator": "eea4663d7e0c3d4d0a78b6928457d7b1fc0e74bcd57b04526ee05dfdefadd2b2",
-        "TemporalConvTensorInputValidator": "c4bdfda122a04f56fa4cdb1c96db07f3b7994fb7128d20fa5abc6e4a28055cf0",
+        "TemporalConvTensorInputValidator": "02bf293b7ef63e84100f53f345f437d74e7b1d60350c470c20cc70d4ed770375",
         "TemporalConvTorchCoverageValidator": "663883d1b1f6292ce6cec2429ca8f55141626148d5207a12b34b620fc6c8aa32",
-        "LSTMTensorInputValidator": "938daf6220b5777d569ed20be334210c5322749d237a4f210112b7fe4a23ce33",
-        "GRUTensorInputValidator": "08150527d908026fba93a12c6c56e727e2df79b0fd46be6995fbd19c74f3240b",
+        "LSTMTensorInputValidator": "15da86adaef72ec82256ab552ccc6059c24470cc5223abbf0fea1b001921ca72",
+        "GRUTensorInputValidator": "a06badee550b4f5ff025bba32f0ae1441d3a7201171e1a7f953edbbe889ea541",
         "LSTMTorchCoverageValidator": "1e8050b5da739e6e5c0f2027e5822d03a0f01f76a602da5442ce563d38ef32b6",
         "GRUTorchCoverageValidator": "e941f2d6e3d9bafe9a1d2d19695959850b65e5995cd614505457801a93da3698",
-        "AutoencoderTensorInputValidator": "cb113f830ec6cea8269f7e3a32a322676d006495d15d601cdf2d5fe724ca7da2",
+        "AutoencoderTensorInputValidator": "5e30a479c9c3923c108f3d274080ba57f59f232666fc3797749d2090e13ea2af",
         "AutoencoderTorchCoverageValidator": "4f66f4c471a0c5893199a1fee410633e70968e54277b6758ab679f326d65d4f5",
-        "TokenTensorInputValidator": "3680c5c613f54e53b2f59bb9327a3220040aaaa4eba91c82da1c783838f22845",
+        "TokenTensorInputValidator": "ac19a92d24930a10039dc519d2e86b34abe6ce271d684462c62332c425aa2cc0",
         "TransformerTorchCoverageValidator": "85ac0a0cafe4a53cefa1d3dbe44a97ca756152174c4ce51bd4d590864bc1126f",
-        "TwoTowerTensorInputValidator": "8afdcbccc2eb8b44220f232e4e52163f8ace134629d239cb351edf3c6d3fc75c",
+        "TwoTowerTensorInputValidator": "dcac4f2f739f6d444915e1db5fae092e01c75a964143f38901e737845b108351",
         "TwoTowerTorchCoverageValidator": "052a6797376c220eb744fbd49f950a02119f45ae748b10412e287d4f7037eadb",
         "GraphSAGETorchInputValidator": "66027ea23bf51af4a9489f9495ebac81fc36f5a947ce5c69a4198f276203fae2",
         "RGCNTorchInputValidator": "d491b1f6ea7eda7745fd9e2339d44e42e146a61e33d458f56c9154d0eb1959c9",
         "GraphSAGETorchCoverageValidator": "6463c5601148af6f734db31dc27f6b8a4cba072aa3a7c87bce610926eebb00ba",
         "RGCNTorchCoverageValidator": "00c724db59a165b9c10bfe159e06910c84af00037f5d96f8676e86e6654eca7f",
-        "JaggedTorchInputValidator": "a152a0ca35891b39599d93a06fe9f479da8684a79461a968a6a50f935dc5ffaf",
+        "JaggedTorchInputValidator": "385ec1288ab3815568006495f8e91c9674d4c16dcf3a1dc8d2d6ec8cd86061b5",
         "JaggedTorchCoverageValidator": "d95f71a86974bd83709a390281cd29e1979d923adcbbb18af8476c68230f48e5",
-        "DistillationTorchInputValidator": "46ea3e591b5776f5ac30cb0cd45be363c7372ee711abe96a1a1c5bccf696d60a",
+        "DistillationTorchInputValidator": "6e48dd0fb8fa43215998c8ce76597c3a077ff3e74299e038839a4b5f74f6c75a",
         "DistillationTorchCoverageValidator": "b728f0b899b90d8cda9028bb9a91be5f5eea13be5c43396f012ae3b810aea15c",
-        "PretrainFinetuneTorchInputValidator": "75975fad1597ccf21285b98408ddc79f9c281445d620468453bfd1b68cfc4271",
+        "PretrainFinetuneTorchInputValidator": "c4ac81aeb88c53b3d975a81b8e4366d2c37bcbbb685ea3e63c89b8d9f6888ecf",
         "PretrainFinetuneTorchCoverageValidator": "c92b65bd0c3f8338e6148f31feb1b656ab9ed9069839ddfaa76b3e38098e1eb2",
     }
     assert set(descriptors) == set(expected)

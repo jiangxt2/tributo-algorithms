@@ -79,23 +79,12 @@ _POLICY = TorchPolicy(
         stages=(
             TorchStageSpec(
                 "teacher",
-                "tributo.integrations.algorithm_runtimes.ray_train_torch:ray_torch_adapter_train_loop_per_worker",
                 ("train",),
-                metric_mapping={
-                    "teacher_loss": "teacher_loss",
-                    "train_loss": "train_loss",
-                },
             ),
             TorchStageSpec(
                 "student",
-                "tributo.integrations.algorithm_runtimes.ray_train_torch:ray_torch_adapter_train_loop_per_worker",
                 ("train",),
-                depends_on=("teacher",),
                 checkpoint_from_stage="teacher",
-                metric_mapping={
-                    "student_loss": "student_loss",
-                    "train_loss": "train_loss",
-                },
             ),
         ),
         final_stage_id="student",
@@ -107,8 +96,6 @@ _POLICY = TorchPolicy(
         "train_loss": MetricReduction.SUM_COUNT,
     },
     backend="auto",
-    resume_supported=False,
-    same_world_size_resume=None,
 )
 
 _CONTRACTS = ContractBindingSet(

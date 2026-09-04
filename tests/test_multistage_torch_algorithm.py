@@ -11,7 +11,7 @@ from tributo.algorithms import (
     RayTorchAdapter,
     TorchCheckpointRef,
 )
-from tributo.algorithms.api import AlgorithmExecutionError
+from tributo.algorithms.api import AlgorithmConfigurationError, AlgorithmExecutionError
 from tributo.algorithms.spi import (
     TorchArtifactContext,
     TorchRuntimeContext,
@@ -23,7 +23,8 @@ from tributo_algorithms_multistage_torch import (
     DistributedDistillation,
 )
 from tributo_algorithms_multistage_torch.algorithm import (
-    _load_retry_state,
+    _gradient_clip_norm,
+    _load_teacher_checkpoint,
     _model,
     _state_digest,
 )
@@ -55,6 +56,45 @@ def test_teacher_and_student_models_have_distinct_capacity() -> None:
         parameter.numel() for parameter in student.parameters()
     )
     assert len(_state_digest(teacher.state_dict())) == 64
+
+
+@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf")])
+def test_distillation_rejects_invalid_gradient_clip_norm(value: float) -> None:
+    with pytest.raises(AlgorithmConfigurationError, match="positive and finite"):
+        _gradient_clip_norm({"max_gradient_norm": value})
+
+
+def test_student_stage_loads_teacher_stage_dependency(tmp_path) -> None:
+    source = _model(2, 4)
+    target = _model(2, 4)
+    torch.save(source.state_dict(), tmp_path / "model.pt")
+
+    class Checkpoint:
+        @contextmanager
+        def as_directory(self):
+            yield str(tmp_path)
+
+    runtime = TorchRuntimeContext({}, "example.distillation", 1, "a" * 64, "b" * 64)
+    stage = TorchStageContext(
+        runtime,
+        "student",
+        1,
+        True,
+        ("train",),
+        predecessor_stage_id="teacher",
+    )
+    checkpoint = TorchWorkerCheckpointContext(
+        stage,
+        "stage_dependency",
+        TorchCheckpointRef(Checkpoint()),
+    )
+
+    _load_teacher_checkpoint(checkpoint, target)
+
+    assert all(
+        torch.equal(source.state_dict()[name], target.state_dict()[name])
+        for name in source.state_dict()
+    )
 
 
 def test_distillation_coverage_requires_both_component_stages() -> None:
@@ -170,63 +210,3 @@ def test_distillation_export_source_preserves_typed_checkpoint_contract(
 def test_distillation_checkpoint_source_requires_a_checkpoint() -> None:
     with pytest.raises(AlgorithmExecutionError, match="no checkpoint"):
         DistributedDistillation().checkpoint_source(type("Result", (), {})(), object())
-
-
-def test_distillation_retry_checkpoint_requires_optimizer_state(tmp_path) -> None:
-    class Checkpoint:
-        @contextmanager
-        def as_directory(self):
-            yield str(tmp_path)
-
-    runtime = TorchRuntimeContext({}, "example.distillation", 1, "a" * 64, "b" * 64)
-    stage = TorchStageContext(runtime, "teacher", 0, True, ("train",))
-    context = TorchWorkerCheckpointContext(
-        stage, "ray_failure_retry", TorchCheckpointRef(Checkpoint())
-    )
-    model = _model(2, 4)
-    optimizer = torch.optim.Adam(model.parameters())
-    torch.save(model.state_dict(), tmp_path / "model.pt")
-    with pytest.raises(AlgorithmExecutionError, match="model/optimizer state"):
-        _load_retry_state(context, model, optimizer, rank=0)
-
-
-def test_distillation_retry_checkpoint_restores_optimizer_and_rng_state(
-    tmp_path,
-) -> None:
-    class Checkpoint:
-        @contextmanager
-        def as_directory(self):
-            yield str(tmp_path)
-
-    runtime = TorchRuntimeContext({}, "example.distillation", 1, "a" * 64, "b" * 64)
-    stage = TorchStageContext(runtime, "teacher", 0, True, ("train",))
-    context = TorchWorkerCheckpointContext(
-        stage, "ray_failure_retry", TorchCheckpointRef(Checkpoint())
-    )
-    torch.manual_seed(29)
-    saved_model = _model(2, 4)
-    saved_optimizer = torch.optim.Adam(saved_model.parameters())
-    sum(parameter.square().sum() for parameter in saved_model.parameters()).backward()
-    saved_optimizer.step()
-    expected_state = {
-        name: value.detach().clone() for name, value in saved_model.state_dict().items()
-    }
-    expected_rng = torch.get_rng_state().clone()
-    torch.save(saved_model.state_dict(), tmp_path / "model.pt")
-    torch.save(saved_optimizer.state_dict(), tmp_path / "optimizer.pt")
-    torch.save({"states": [expected_rng.numpy().tobytes()]}, tmp_path / "rng_state.pt")
-
-    target_model = _model(2, 4)
-    target_optimizer = torch.optim.Adam(target_model.parameters())
-    torch.manual_seed(99)
-    assert _load_retry_state(context, target_model, target_optimizer, rank=0) == 0
-    for name, value in target_model.state_dict().items():
-        torch.testing.assert_close(value, expected_state[name])
-    assert target_optimizer.state_dict()["state"]
-    torch.testing.assert_close(torch.get_rng_state(), expected_rng)
-
-    wrong_source = TorchWorkerCheckpointContext(
-        stage, "stage_dependency", TorchCheckpointRef(Checkpoint())
-    )
-    with pytest.raises(AlgorithmExecutionError, match="only Ray failure retry"):
-        _load_retry_state(wrong_source, target_model, target_optimizer, rank=0)

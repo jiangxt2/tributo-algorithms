@@ -28,36 +28,58 @@ class RepresentationConfigValidator:
         ):
             raise ValueError("representation output.bundle_uri is required")
         optimizer = value.get("optimizer", {})
-        if (
-            isinstance(optimizer, Mapping)
-            and "accumulation_steps" in optimizer
-            and optimizer["accumulation_steps"] != 1
-        ):
-            raise ValueError("Autoencoder accumulation_steps must be positive")
+        if isinstance(optimizer, Mapping):
+            accumulation = optimizer.get("accumulation_steps", 1)
+            if (
+                not isinstance(accumulation, int)
+                or isinstance(accumulation, bool)
+                or accumulation < 1
+            ):
+                raise ValueError("Autoencoder accumulation_steps must be positive")
         return dict(value)
 
 
 class AutoencoderTensorInputValidator:
     api_version = 1
-    schema_digest = _digest("tensor-input")
+    schema_digest = _digest("tensor-input-role-routed")
 
     def validate(self, value: Mapping[str, Any]) -> Mapping[str, Any]:
         bindings = value.get("bindings")
-        if not isinstance(bindings, list) or len(bindings) != 1:
-            raise ValueError("Autoencoder requires one train binding")
-        binding = bindings[0]
-        if not isinstance(binding, Mapping) or binding.get("role", "train") != "train":
-            raise ValueError("Autoencoder requires a train binding")
-        features = binding.get("feature_names")
-        if not isinstance(features, list) or not features:
-            raise ValueError("Autoencoder requires named dense feature columns")
-        if (
-            binding.get("label_name") is not None
-            or binding.get("sample_weight_name") is not None
-        ):
+        if not isinstance(bindings, list) or not 1 <= len(bindings) <= 3:
             raise ValueError(
-                "Autoencoder does not accept label or sample-weight bindings"
+                "Autoencoder requires train and optional val/test bindings"
             )
+        if any(not isinstance(binding, Mapping) for binding in bindings):
+            raise ValueError("Autoencoder bindings must be mappings")
+        names = [binding.get("name") for binding in bindings]
+        if any(not isinstance(name, str) for name in names):
+            raise ValueError("Autoencoder input roles must be named")
+        by_role = {str(binding["name"]): binding for binding in bindings}
+        if (
+            len(by_role) != len(bindings)
+            or "train" not in by_role
+            or not set(by_role).issubset({"train", "val", "test"})
+            or value.get("primary_role") != "train"
+        ):
+            raise ValueError("Autoencoder input roles are invalid")
+        expected_features = by_role["train"].get("feature_names")
+        for binding in by_role.values():
+            features = binding.get("feature_names")
+            if (
+                not isinstance(features, list)
+                or not features
+                or features != expected_features
+            ):
+                raise ValueError(
+                    "Autoencoder requires consistent named dense feature columns"
+                )
+            if (
+                binding.get("label_name") is not None
+                or binding.get("sample_weight_name") is not None
+            ):
+                raise ValueError(
+                    "Autoencoder does not accept label or sample-weight bindings"
+                )
         return value
 
 

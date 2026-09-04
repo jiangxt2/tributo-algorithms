@@ -40,7 +40,9 @@ class DistillationConfigValidator:
 
 class DistillationInputValidator:
     api_version = 1
-    schema_digest = hashlib.sha256(b"tributo.distillation.dense-labeled.v2").hexdigest()
+    schema_digest = hashlib.sha256(
+        b"tributo.distillation.dense-labeled-role-named.v2"
+    ).hexdigest()
 
     def validate(self, value: Mapping[str, Any]) -> Mapping[str, Any]:
         bindings = value.get("bindings")
@@ -49,7 +51,7 @@ class DistillationInputValidator:
         binding = bindings[0]
         if (
             not isinstance(binding, Mapping)
-            or binding.get("role", "train") != "train"
+            or binding.get("name") != "train"
             or not binding.get("feature_names")
             or not binding.get("label_name")
             or binding.get("sample_weight_name") is not None
@@ -127,7 +129,7 @@ class PretrainFinetuneConfigValidator:
 class PretrainFinetuneInputValidator:
     api_version = 1
     schema_digest = hashlib.sha256(
-        b"tributo.pretrain-finetune.dense-labeled.v2"
+        b"tributo.pretrain-finetune.dense-labeled-role-named.v2"
     ).hexdigest()
 
     def validate(self, value: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -137,7 +139,7 @@ class PretrainFinetuneInputValidator:
         binding = bindings[0]
         if (
             not isinstance(binding, Mapping)
-            or binding.get("role", "train") != "train"
+            or binding.get("name") != "train"
             or not binding.get("feature_names")
             or not binding.get("label_name")
             or binding.get("sample_weight_name") is not None

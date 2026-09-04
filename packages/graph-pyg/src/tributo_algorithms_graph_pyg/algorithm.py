@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
+import math
+import operator
 import tempfile
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -16,6 +17,7 @@ from tributo.algorithms.api import (
     AlgorithmExecutionError,
     TorchAccumulationWindow,
     TorchBackwardContext,
+    TorchCheckpointPayloadDraft,
     TorchCheckpointRef,
     TorchLossContribution,
     TorchMetricContribution,
@@ -35,6 +37,36 @@ from tributo.algorithms.spi import (
     TorchWorkerCheckpointContext,
 )
 from tributo.util.annotations import PublicAPI
+
+
+def _integer_values(values: object, field_name: str) -> list[int]:
+    import numpy as np
+
+    result: list[int] = []
+    for raw_value in cast(Any, values):
+        if isinstance(raw_value, (bool, np.bool_)):
+            raise AlgorithmExecutionError(f"{field_name} must contain integer values")
+        try:
+            result.append(operator.index(raw_value))
+        except TypeError as exc:
+            raise AlgorithmExecutionError(
+                f"{field_name} must contain integer values"
+            ) from exc
+    return result
+
+
+def _gradient_clip_norm(training: Mapping[str, Any]) -> float:
+    value = training.get("max_gradient_norm", 1.0)
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(float(value))
+        or float(value) <= 0
+    ):
+        raise AlgorithmConfigurationError(
+            "training.max_gradient_norm must be positive and finite"
+        )
+    return float(value)
 
 
 def _build_model(
@@ -99,7 +131,14 @@ def _node_lookup_model(model: object, logits: object) -> object:
             )
 
         def forward(self, node_id: object) -> object:
-            values = cast(torch.Tensor, node_id).long()
+            values = cast(torch.Tensor, node_id)
+            if (
+                values.dtype == torch.bool
+                or values.is_floating_point()
+                or values.is_complex()
+            ):
+                raise ValueError("graph node IDs must contain integer values")
+            values = values.to(dtype=torch.long)
             stored = cast(torch.Tensor, self.inference_logits)
             valid = values.ge(0).logical_and(values.lt(stored.shape[0]))
             safe = values.clamp(min=0, max=stored.shape[0] - 1)
@@ -206,67 +245,12 @@ def _graph_source_fingerprint(
     ).hexdigest()
 
 
-def _load_checkpoint_state(
-    checkpoint_context: TorchWorkerCheckpointContext,
-    model: object,
-    optimizer: object,
-    *,
-    rank: int,
-) -> int:
-    if checkpoint_context.checkpoint is None:
-        return 0
-    if checkpoint_context.source != "ray_failure_retry":
-        raise AlgorithmExecutionError(
-            "graph adapters accept only Ray failure retry Checkpoints"
-        )
-    import torch
-
-    checkpoint = checkpoint_context.checkpoint.checkpoint
-    opener = getattr(checkpoint, "as_directory", None)
-    if not callable(opener):
-        raise AlgorithmExecutionError("graph retry checkpoint cannot be opened")
-    with opener() as directory:
-        root = Path(directory)
-        state_path = root / "model.pt"
-        optimizer_path = root / "optimizer.pt"
-        rng_path = root / "rng_state.pt"
-        if not state_path.is_file() or not optimizer_path.is_file():
-            raise AlgorithmExecutionError(
-                "graph retry checkpoint is missing model/optimizer state"
-            )
-        state = torch.load(state_path, map_location="cpu", weights_only=True)
-        target_model = cast(torch.nn.Module, getattr(model, "module", model))
-        target_model.load_state_dict(state)
-        cast(Any, optimizer).load_state_dict(
-            torch.load(optimizer_path, map_location="cpu", weights_only=True)
-        )
-        if rng_path.is_file():
-            payload = torch.load(rng_path, map_location="cpu", weights_only=True)
-            states = payload.get("states") if isinstance(payload, Mapping) else None
-            raw_state = (
-                states[rank]
-                if isinstance(states, list) and rank < len(states)
-                else payload
-            )
-            if isinstance(raw_state, bytes):
-                torch.set_rng_state(
-                    torch.frombuffer(bytearray(raw_state), dtype=torch.uint8).clone()
-                )
-            elif isinstance(raw_state, torch.Tensor):
-                torch.set_rng_state(raw_state.to(dtype=torch.uint8).cpu())
-            else:
-                raise AlgorithmExecutionError("graph retry RNG state is malformed")
-    descriptor = checkpoint_context.checkpoint.descriptor
-    return int(descriptor.completed_step) if descriptor is not None else 0
-
-
 def _graph_train_loop(
     config: Mapping[str, Any], checkpoint_context: TorchWorkerCheckpointContext
 ) -> None:
     import ray
     import torch
     from ray import train
-    from ray.train import Checkpoint
     from ray.train.torch import get_device, prepare_model
 
     columns = config.get("columns")
@@ -309,7 +293,7 @@ def _graph_train_loop(
         train_dataset,
         (str(names["seed_node_id"]), str(names["seed_label"])),
     )
-    raw_node_ids = [int(cast(Any, value)) for value in nodes[str(names["node_id"])]]
+    raw_node_ids = _integer_values(nodes[str(names["node_id"])], "graph node IDs")
     order = sorted(range(len(raw_node_ids)), key=raw_node_ids.__getitem__)
     node_ids = [raw_node_ids[index] for index in order]
     if node_ids != list(range(len(node_ids))):
@@ -327,12 +311,12 @@ def _graph_train_loop(
         dtype=torch.float32,
         device=device,
     )
-    source = [int(cast(Any, value)) for value in edges[str(names["edge_source"])]]
-    destination = [
-        int(cast(Any, value)) for value in edges[str(names["edge_destination"])]
-    ]
+    source = _integer_values(edges[str(names["edge_source"])], "graph edge sources")
+    destination = _integer_values(
+        edges[str(names["edge_destination"])], "graph edge destinations"
+    )
     relations = (
-        [int(cast(Any, value)) for value in edges[str(names["edge_relation"])]]
+        _integer_values(edges[str(names["edge_relation"])], "graph edge relation IDs")
         if names.get("edge_relation") is not None
         else []
     )
@@ -359,12 +343,12 @@ def _graph_train_loop(
         torch.tensor(relations, dtype=torch.long, device=device) if relations else None
     )
     seed_index = torch.tensor(
-        [int(cast(Any, value)) for value in seeds[str(names["seed_node_id"])]],
+        _integer_values(seeds[str(names["seed_node_id"])], "graph seed node IDs"),
         dtype=torch.long,
         device=device,
     )
     labels = torch.tensor(
-        [int(cast(Any, value)) for value in seeds[str(names["seed_label"])]],
+        _integer_values(seeds[str(names["seed_label"])], "graph labels"),
         dtype=torch.long,
         device=device,
     )
@@ -400,17 +384,16 @@ def _graph_train_loop(
     optimizer = torch.optim.Adam(
         model.parameters(), lr=float(training.get("learning_rate", 0.01))
     )
+    max_gradient_norm = _gradient_clip_norm(training)
     context = train.get_context()
     rank, world_size = context.get_world_rank(), context.get_world_size()
-    restored_step = _load_checkpoint_state(
-        checkpoint_context, model, optimizer, rank=rank
-    )
+    if checkpoint_context.source != "none" or checkpoint_context.checkpoint is not None:
+        raise AlgorithmExecutionError("graph Stage does not accept an input Checkpoint")
     epochs = int(training.get("epochs", 2))
-    start_epoch = min(restored_step, epochs)
     loss_value = 0.0
     metric_rows = 0
     metric_correct = 0
-    for epoch in range(start_epoch, epochs):
+    for epoch in range(epochs):
         logits = (
             model(x, edge_index, edge_type)
             if edge_type is not None
@@ -424,9 +407,7 @@ def _graph_train_loop(
             for parameter in model.parameters():
                 if parameter.grad is not None:
                     parameter.grad.mul_(scale)
-            torch.nn.utils.clip_grad_norm_(
-                model.parameters(), float(training.get("max_gradient_norm", 1.0))
-            )
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_gradient_norm)
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
 
@@ -519,8 +500,8 @@ def _graph_train_loop(
             "nodes": len(node_ids),
             "edges": len(source),
         },
-        "batch_count": max(epochs - start_epoch, 0),
-        "collective_steps": max(epochs - start_epoch, 0),
+        "batch_count": epochs,
+        "collective_steps": epochs,
         "model_state_digest": model_digest,
         "topology_digest": topology_digest,
         "node_feature_digest": node_feature_digest,
@@ -539,14 +520,6 @@ def _graph_train_loop(
     with tempfile.TemporaryDirectory(prefix="tributo-graph-checkpoint-") as directory:
         root = Path(directory)
         torch.save(model.state_dict(), root / "model.pt")
-        torch.save(optimizer.state_dict(), root / "optimizer.pt")
-        rng_state = torch.get_rng_state().cpu().numpy().tobytes()
-        rng_states: list[object] = [rng_state] * world_size
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            torch.distributed.all_gather_object(rng_states, rng_state)
-        torch.save(
-            {"world_size": world_size, "states": rng_states}, root / "rng_state.pt"
-        )
         torch.save(inference_logits, root / "inference_logits.pt")
         (root / "model_config.json").write_text(
             json.dumps(
@@ -568,20 +541,6 @@ def _graph_train_loop(
             encoding="utf-8",
         )
 
-        class Draft:
-            checkpoint_dir: str | os.PathLike[str] = str(root)
-
-            def report(
-                self,
-                *,
-                metrics: Mapping[str, object],
-                stage_context: object,
-                completed_step: int,
-            ) -> None:
-                del stage_context, completed_step
-                checkpoint = Checkpoint.from_directory(str(root)) if rank == 0 else None
-                train.report(dict(metrics), checkpoint=checkpoint)
-
         report_torch_checkpoint(
             {
                 "train_loss": reduced_metrics.values["train_loss"],
@@ -589,7 +548,7 @@ def _graph_train_loop(
                 "execution_workers": workers,
                 "model_state_digest": model_digest,
             },
-            Draft(),
+            TorchCheckpointPayloadDraft(root),
             descriptor_context,
             epochs,
         )

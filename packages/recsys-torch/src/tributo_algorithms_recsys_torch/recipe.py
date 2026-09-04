@@ -25,6 +25,15 @@ from tributo.algorithms.spi import (
 )
 
 
+def _integer_tensor(value: object, field_name: str) -> Any:
+    import torch
+
+    tensor = torch.as_tensor(value)
+    if tensor.dtype == torch.bool or tensor.is_floating_point() or tensor.is_complex():
+        raise ValueError(f"{field_name} must contain integer values")
+    return tensor.to(dtype=torch.int64)
+
+
 def _model(config: Mapping[str, Any]) -> object:
     import torch
 
@@ -43,8 +52,8 @@ def _model(config: Mapping[str, Any]) -> object:
             self.item_bias = torch.nn.Embedding(item_count, 1)
 
         def forward(self, user_id: object, item_id: object) -> object:
-            users = cast(torch.Tensor, user_id).long()
-            items = cast(torch.Tensor, item_id).long()
+            users = cast(torch.Tensor, _integer_tensor(user_id, "Two-Tower user IDs"))
+            items = cast(torch.Tensor, _integer_tensor(item_id, "Two-Tower item IDs"))
             if users.ndim != 1 or items.ndim != 1 or users.shape != items.shape:
                 raise ValueError("Two-Tower IDs must have shape [batch]")
             if bool((users < 0).any()) or bool((users >= user_count).any()):
@@ -70,8 +79,8 @@ def _batch(batch: object, context: TorchBatchContext) -> TorchBatch:
         raise ValueError("Two-Tower requires user_id, item_id, and label")
     if context.weight_name is not None:
         raise ValueError("Two-Tower does not support sample-weight binding")
-    user_id = torch.as_tensor(batch[names[0]], dtype=torch.int64)
-    item_id = torch.as_tensor(batch[names[1]], dtype=torch.int64)
+    user_id = _integer_tensor(batch[names[0]], "Two-Tower user IDs")
+    item_id = _integer_tensor(batch[names[1]], "Two-Tower item IDs")
     labels = torch.as_tensor(batch[label_name], dtype=torch.float32).reshape(-1, 1)
     if not torch.isfinite(labels).all() or not bool(
         ((labels == 0) | (labels == 1)).all()
@@ -85,7 +94,6 @@ def _batch(batch: object, context: TorchBatchContext) -> TorchBatch:
         targets=labels,
         local_rows=rows,
         coverage_counts={
-            "train": rows,
             "coverage.positive_pairs": int((labels == 1).sum().item()),
             "coverage.negative_pairs": int((labels == 0).sum().item()),
         },
@@ -149,8 +157,8 @@ class TwoTowerRecipe(TorchRecipe):
                 lr=float(config.get("learning_rate", 0.01)),
                 weight_decay=float(config.get("weight_decay", 0.0)),
             ),
-            gradient_accumulation_steps=int(config.get("accumulation_steps", 1)),
-            max_gradient_norm=float(config.get("max_gradient_norm", 1.0)),
+            gradient_accumulation_steps=config.get("accumulation_steps", 1),
+            max_gradient_norm=config.get("max_gradient_norm", 1.0),
         )
 
     def metric_plan(self, context: TorchRuntimeContext) -> TorchMetricPlan:

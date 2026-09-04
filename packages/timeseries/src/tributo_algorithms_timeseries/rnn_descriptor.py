@@ -98,9 +98,7 @@ def _descriptor(
         execution_plan=SingleStageTorchPlan(
             stage=TorchStageSpec(
                 "train",
-                "tributo.integrations.algorithm_runtimes.ray_train_torch:torch_recipe_train_loop_per_worker",
                 ("train", "val", "test"),
-                metric_mapping={"accuracy": "accuracy", "train_loss": "train_loss"},
             )
         ),
         state_layout="replicated",
@@ -109,8 +107,6 @@ def _descriptor(
             "train_loss": MetricReduction.SUM_COUNT,
         },
         backend="auto",
-        resume_supported=True,
-        same_world_size_resume=True,
     )
     contracts = ContractBindingSet(
         config=_binding(spec.config_contract_ref or "", RNNConfigValidator, 1),

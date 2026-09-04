@@ -23,7 +23,7 @@ from tributo_algorithms_recsys_torch.contracts import (
 )
 
 
-def _context() -> TorchBuildContext:
+def _context(optimizer: dict[str, object] | None = None) -> TorchBuildContext:
     policy = TWO_TOWER_DESCRIPTOR.registration.distribution_spec.policy
     identity = TorchStageRunIdentity(
         "aabbccdd",
@@ -36,8 +36,13 @@ def _context() -> TorchBuildContext:
         policy.digest,
         policy.execution_plan.digest,
     )
+    algorithm_config: dict[str, object] = {
+        "model": {"user_count": 4, "item_count": 5, "embedding_dim": 3}
+    }
+    if optimizer is not None:
+        algorithm_config["optimizer"] = optimizer
     runtime = TorchRuntimeContext(
-        {"model": {"user_count": 4, "item_count": 5, "embedding_dim": 3}},
+        algorithm_config,
         "two-tower",
         1,
         policy.digest,
@@ -67,13 +72,36 @@ def test_two_tower_uses_two_named_id_tensors() -> None:
             "item_id": torch.tensor([1, 2, 3, 4]),
             "label": torch.tensor([1.0, 0.0, 1.0, 0.0]),
         },
-        TorchBatchContext(build.stage, ("user_id", "item_id"), "label"),
+        TorchBatchContext(build.stage, ("user_id", "item_id"), label_name="label"),
     )
     result = recipe.training_step(modules, adapted, TorchStepContext(build.stage, 0, 0))
     assert set(adapted.keyword) == {"user_id", "item_id"}
     assert result.outputs["output"].shape == (4, 1)
     assert result.loss.normalizer == 4
     assert result.coverage_counts["coverage.positive_pairs"] == 2
+
+
+@pytest.mark.parametrize("invalid_ids", [torch.tensor([1.5]), torch.tensor([True])])
+def test_two_tower_rejects_non_integer_ids(invalid_ids: torch.Tensor) -> None:
+    recipe = TwoTowerRecipe()
+    build = _context()
+    with pytest.raises(ValueError, match="integer values"):
+        recipe.adapt_batch(
+            {
+                "user_id": invalid_ids,
+                "item_id": torch.tensor([1]),
+                "label": torch.tensor([1.0]),
+            },
+            TorchBatchContext(build.stage, ("user_id", "item_id"), label_name="label"),
+        )
+
+
+def test_two_tower_rejects_fractional_accumulation() -> None:
+    recipe = TwoTowerRecipe()
+    build = _context({"accumulation_steps": 1.5})
+    modules = recipe.build_modules(build)
+    with pytest.raises(ValueError, match="gradient_accumulation_steps"):
+        recipe.configure_optimizers(modules, build)
 
 
 def test_pair_coverage_contract_partitions_interactions() -> None:
@@ -112,14 +140,15 @@ def test_two_tower_uses_new_typed_input_and_coverage_contracts() -> None:
 
 def test_two_tower_v2_input_rejects_sample_weights() -> None:
     value = {
+        "primary_role": "train",
         "bindings": [
             {
-                "role": "train",
+                "name": "train",
                 "feature_names": ["user_id", "item_id"],
                 "label_name": "label",
                 "sample_weight_name": "weight",
             }
-        ]
+        ],
     }
     with pytest.raises(ValueError, match="user ID"):
         TwoTowerTensorInputValidator().validate(value)

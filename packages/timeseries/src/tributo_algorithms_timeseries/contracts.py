@@ -37,20 +37,40 @@ class WindowInputValidator:
 
     def validate(self, value: Mapping[str, Any]) -> Mapping[str, Any]:
         bindings = value.get("bindings")
-        if not isinstance(bindings, list) or len(bindings) != 1:
-            raise ValueError("time-series training requires one train binding")
-        binding = bindings[0]
-        if not isinstance(binding, Mapping) or binding.get("role", "train") != "train":
-            raise ValueError("time-series input requires a train binding")
-        features = binding.get("feature_names")
-        if not isinstance(features, list) or len(features) < 2:
-            raise ValueError("time-series input requires at least two ordered lags")
-        if not isinstance(binding.get("label_name"), str) or not binding["label_name"]:
-            raise ValueError("time-series input requires a label")
-        if binding.get("sample_weight_name") is not None:
-            raise ValueError(
-                "time-series algorithms do not support sample-weight binding"
-            )
+        if not isinstance(bindings, list) or not 1 <= len(bindings) <= 3:
+            raise ValueError("time-series input requires train and optional val/test")
+        if any(not isinstance(binding, Mapping) for binding in bindings):
+            raise ValueError("time-series bindings must be mappings")
+        names = [binding.get("name") for binding in bindings]
+        if any(not isinstance(name, str) for name in names):
+            raise ValueError("time-series input roles must be named")
+        by_role = {str(binding["name"]): binding for binding in bindings}
+        if (
+            len(by_role) != len(bindings)
+            or "train" not in by_role
+            or not set(by_role).issubset({"train", "val", "test"})
+            or value.get("primary_role") != "train"
+        ):
+            raise ValueError("time-series input roles are invalid")
+        train = by_role["train"]
+        expected_features = train.get("feature_names")
+        expected_label = train.get("label_name")
+        for binding in by_role.values():
+            features = binding.get("feature_names")
+            if (
+                not isinstance(features, list)
+                or len(features) < 2
+                or features != expected_features
+            ):
+                raise ValueError("time-series input requires consistent ordered lags")
+            if binding.get("label_name") != expected_label or not isinstance(
+                expected_label, str
+            ):
+                raise ValueError("time-series input requires a consistent label")
+            if binding.get("sample_weight_name") is not None:
+                raise ValueError(
+                    "time-series algorithms do not support sample-weight binding"
+                )
         return value
 
 
@@ -82,7 +102,7 @@ class WindowCoverageValidator:
 
 class TemporalConvTensorInputValidator(WindowInputValidator):
     api_version = 1
-    schema_digest = _digest("tcn-window-input")
+    schema_digest = _digest("tcn-window-input-role-routed")
 
 
 class TemporalConvTorchCoverageValidator(WindowCoverageValidator):

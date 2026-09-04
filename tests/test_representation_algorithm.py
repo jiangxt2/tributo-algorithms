@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 
+import pytest
 import torch
 from tributo.algorithms import (
     DistributionStrategy,
@@ -15,6 +16,7 @@ from tributo.algorithms import (
     TorchStepContext,
 )
 from tributo_algorithms_representation import TABULAR_AUTOENCODER_DESCRIPTOR
+from tributo_algorithms_representation.contracts import RepresentationConfigValidator
 from tributo_algorithms_representation.recipe import TabularAutoencoderRecipe
 
 
@@ -69,3 +71,22 @@ def test_autoencoder_uses_element_normalizer() -> None:
     assert result.outputs["output"].shape == (2, 3)
     assert result.loss.normalizer == 6
     assert result.metrics["reconstruction_mse"].normalizer == 6
+
+
+def test_autoencoder_config_accepts_positive_accumulation() -> None:
+    value = {
+        "optimizer": {"accumulation_steps": 2},
+        "output": {"bundle_uri": "/tmp/model"},
+    }
+    assert RepresentationConfigValidator().validate(value) == value
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5])
+def test_autoencoder_config_rejects_invalid_accumulation(value: object) -> None:
+    with pytest.raises(ValueError, match="accumulation_steps"):
+        RepresentationConfigValidator().validate(
+            {
+                "optimizer": {"accumulation_steps": value},
+                "output": {"bundle_uri": "/tmp/model"},
+            }
+        )

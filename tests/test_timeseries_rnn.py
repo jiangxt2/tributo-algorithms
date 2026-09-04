@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 
+import pytest
 import torch
 from tributo.algorithms import (
     DistributionStrategy,
+    TorchArtifactContext,
     TorchBatchContext,
     TorchBuildContext,
     TorchRuntimeContext,
@@ -14,6 +16,7 @@ from tributo.algorithms import (
     TorchStageRunIdentity,
     TorchStepContext,
 )
+from tributo_algorithms_timeseries.rnn_contracts import RNNConfigValidator
 from tributo_algorithms_timeseries.rnn_descriptor import GRU_DESCRIPTOR, LSTM_DESCRIPTOR
 from tributo_algorithms_timeseries.rnn_recipe import GRURecipe, LSTMRecipe
 
@@ -74,7 +77,9 @@ def test_lstm_and_gru_recipes_produce_fixed_window_logits() -> None:
         build = _context(descriptor)
         stage = build.stage
         batch_context = TorchBatchContext(
-            stage, ("lag_0", "lag_1", "lag_2", "lag_3"), "label"
+            stage,
+            ("lag_0", "lag_1", "lag_2", "lag_3"),
+            label_name="label",
         )
         modules = recipe.build_modules(build)
         adapted = recipe.adapt_batch(_batch(), batch_context)
@@ -82,3 +87,25 @@ def test_lstm_and_gru_recipes_produce_fixed_window_logits() -> None:
         assert tuple(result.outputs["output"].shape) == (4, 1)
         assert result.loss.normalizer == 4
         assert recipe.configure_optimizers(modules, build).optimizer is not None
+        artifact = recipe.artifact_plan(TorchArtifactContext(stage))
+        assert artifact.input_signature[0]["shape"] == ("batch", 4)
+        assert tuple(modules["model"](torch.zeros(2, 4)).shape) == (2, 1)
+
+
+@pytest.mark.parametrize(
+    ("invalid", "message"),
+    [
+        ({"optimizer": {"weight_decay": -1}}, "weight_decay"),
+        ({"optimizer": {"max_gradient_norm": 0}}, "max_gradient_norm"),
+        ({"model": {"input_features": 0}}, "model.input_features"),
+        ({"model": {"hidden_size": True}}, "model.hidden_size"),
+        ({"model": {"num_layers": 1.5}}, "model.num_layers"),
+    ],
+)
+def test_rnn_config_preserves_v1_parameter_validation(
+    invalid: dict[str, object], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        RNNConfigValidator().validate(
+            {**invalid, "output": {"bundle_uri": "/tmp/model"}}
+        )
