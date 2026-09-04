@@ -106,7 +106,7 @@ def test_workflows_use_the_portable_nested_checkout_layout() -> None:
         assert "--no-sources" in workflow
         assert "verify_installed_distribution.py" in workflow
         assert "--require-scalar-single-column-binding" in workflow
-        assert "6ef79841261d88c98bab420193afbe58ca6baa28" in workflow
+        assert "cdb247c801dee816fdcccdd96d1ddc6f59f7d77d" in workflow
     assert "branches: [master]" in ci
     assert "branches: [main]" not in ci
     assert "resolve_release_package.py" in release

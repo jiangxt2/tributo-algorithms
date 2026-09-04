@@ -6,7 +6,7 @@ on:
     branches: [master]
 
 env:
-  TRIBUTO_CORE_REF: 6ef79841261d88c98bab420193afbe58ca6baa28
+  TRIBUTO_CORE_REF: cdb247c801dee816fdcccdd96d1ddc6f59f7d77d
 
 jobs:
   validate:
