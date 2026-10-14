@@ -19,7 +19,7 @@ from tributo.training.algorithm_spec import AlgorithmSpec, Capability, ProblemTy
 
 STAGES = ("estimate", "refute")
 
-_PACKAGE = "tributo-algorithms-causal-dowhy"
+_PACKAGE = "tributo-algorithms"
 _VERSION = "0.1.0"
 
 
@@ -66,10 +66,9 @@ DOWHY_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
     environment=EnvironmentSpec(
         environment_id="tributo.official.causal-dowhy.v1",
         dependencies=(
-            "dowhy>=0.13,<0.15",
-            "tributo-algorithms-causal-core==0.1.0",
-            "tributo>=1,<2",
-            f"{_PACKAGE}=={_VERSION}",
+            "dowhy>=0.14,<0.15",
+            "tributo>=1.1,<1.2",
+            f"tributo-algorithms[causal-dowhy]=={_VERSION}",
         ),
     ),
     allowed_config_keys=("data", "output", "refutation", "runtime"),
@@ -87,7 +86,7 @@ DOWHY_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
     ),
     package_name=_PACKAGE,
     package_version=_VERSION,
-    tributo_version_spec=">=1,<2",
+    tributo_version_spec=">=1.1,<1.2",
     exporter="tributo_algorithms_causal_dowhy.algorithm:export_result",
     flavor_id="onnx-runtime-v1",
     contract_bindings=ContractBindingSet(

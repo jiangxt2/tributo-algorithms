@@ -29,7 +29,7 @@ class CompleteCoverageDataConfig(DataConfig):
         # This mirrors Ray's public DataConfig implementation while changing
         # only ``equal``.  The remaining setup preserves Train's resource
         # exclusion and locality behavior.
-        from ray.data._internal.execution.interfaces import ExecutionResources
+        from ray.data import ExecutionResources
 
         output: list[dict[str, Any]] = [{} for _ in range(world_size)]
         for dataset_name, dataset in datasets.items():

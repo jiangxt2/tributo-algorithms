@@ -34,7 +34,7 @@ from tributo_algorithms_graph_pyg.contracts import (
     RGCNTorchInputValidator,
 )
 
-_PACKAGE = "tributo-algorithms-graph-pyg"
+_PACKAGE = "tributo-algorithms"
 _VERSION = "0.1.0"
 _ROOT = Path(__file__).resolve().parent
 
@@ -130,10 +130,10 @@ _ENVIRONMENT = EnvironmentSpec(
         "onnx>=1.16",
         "onnxruntime>=1.20",
         "safetensors>=0.4.3",
-        "torch>=2.5",
+        "torch>=2.5,<2.14",
         "torch-geometric>=2.5",
-        "tributo>=1,<2",
-        f"{_PACKAGE}=={_VERSION}",
+        "tributo>=1.1,<1.2",
+        f"tributo-algorithms[graph-pyg]=={_VERSION}",
     ),
 )
 
@@ -186,7 +186,7 @@ def _descriptor(*, relational: bool) -> object:
         resources_per_worker=WorkerResources(num_cpus=1),
         package_name=_PACKAGE,
         package_version=_VERSION,
-        tributo_version_spec=">=1,<2",
+        tributo_version_spec=">=1.1,<1.2",
         policy=_policy(relational=relational),
         code_digest=_code_digest(),
         contract_bindings=contracts,

@@ -114,7 +114,7 @@ MULTINOMIAL_NB_REGISTRATION = AlgorithmRegistration(
             supported_explicit_adapters=(_INPUT_ADAPTER,),
             distribution_policy=(RuntimeTopology.RAY_MAP_REDUCE,),
         ),
-        distribution="tributo-algorithms-classical",
+        distribution="tributo-algorithms",
         framework="sklearn",
         artifact_format="none",
         allowed_config_keys=(
@@ -134,8 +134,8 @@ MULTINOMIAL_NB_REGISTRATION = AlgorithmRegistration(
     environment=EnvironmentSpec(
         environment_id="tributo.multinomial_nb.v1",
         dependencies=(
-            "tributo-algorithms-classical==0.1.0",
-            "tributo>=1,<2",
+            "tributo-algorithms[classical]==0.1.0",
+            "tributo>=1.1,<1.2",
             "onnx>=1.16.0",
             "onnxruntime>=1.20.0",
             "scikit-learn>=1.4,<2",
@@ -173,9 +173,9 @@ MULTINOMIAL_NB_REGISTRATION = AlgorithmRegistration(
 
 MULTINOMIAL_NB_DESCRIPTOR = DistributedAlgorithmDescriptor(
     registration=MULTINOMIAL_NB_REGISTRATION,
-    package_name="tributo-algorithms-classical",
+    package_name="tributo-algorithms",
     package_version="0.1.0",
-    tributo_version_spec=">=1,<2",
+    tributo_version_spec=">=1.1,<1.2",
     api_version=2,
 )
 

@@ -19,7 +19,7 @@ from tributo.algorithms.api import (
 )
 from tributo.training.algorithm_spec import AlgorithmSpec, Capability, ProblemType
 
-_PACKAGE = "tributo-algorithms-causal-core"
+_PACKAGE = "tributo-algorithms"
 _VERSION = "0.1.0"
 _COMMON_STATE = (
     StateField("treated_count", "int64", ()),
@@ -134,8 +134,8 @@ _ENVIRONMENT = EnvironmentSpec(
         "numpy>=2,<3",
         "scikit-learn>=1.4,<2",
         "skl2onnx>=1.17",
-        "tributo>=1,<2",
-        f"{_PACKAGE}=={_VERSION}",
+        "tributo>=1.1,<1.2",
+        f"tributo-algorithms[causal-core]=={_VERSION}",
     ),
 )
 
@@ -204,7 +204,7 @@ def _descriptor(
         ),
         package_name=_PACKAGE,
         package_version=_VERSION,
-        tributo_version_spec=">=1,<2",
+        tributo_version_spec=">=1.1,<1.2",
         exporter="tributo_algorithms_causal_core.algorithm:export_model",
         flavor_id="onnx-runtime-v1",
         contract_bindings=contract_bindings,

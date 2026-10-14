@@ -36,6 +36,26 @@ def _split_rows(materialized: object, fold_count: int) -> tuple[object, ...]:
     return tuple(cast(Any, materialized).split_at_indices(boundaries))
 
 
+def _validate_treatment_batch(batch: object, *, treatment_name: str) -> object:
+    """Reject missing, non-finite, or non-binary treatment values."""
+    import numpy as np
+
+    frame = cast(Any, batch)
+    if treatment_name not in frame.columns:
+        raise ValueError(f"treatment column {treatment_name!r} is missing")
+    try:
+        treatment = frame[treatment_name].to_numpy(dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError("DR treatment values must be numeric binary values") from error
+    if not np.isfinite(treatment).all():
+        raise ValueError("DR treatment values must be finite")
+    if not np.isin(treatment, (0.0, 1.0)).all():
+        raise ValueError("DR treatment values must be exactly 0 or 1")
+    normalized = frame.copy()
+    normalized[treatment_name] = treatment.astype(np.int8)
+    return normalized
+
+
 def _lossless_folds(
     dataset: object,
     treatment_name: str,
@@ -46,13 +66,13 @@ def _lossless_folds(
     """Create stratified disjoint folds while retaining every row."""
     treated = (
         cast(Any, dataset)
-        .filter(lambda row: int(row[treatment_name]) == 1)
+        .filter(lambda row: row[treatment_name] == 1)
         .random_shuffle(seed=seed)
         .materialize()
     )
     control = (
         cast(Any, dataset)
-        .filter(lambda row: int(row[treatment_name]) == 0)
+        .filter(lambda row: row[treatment_name] == 0)
         .random_shuffle(seed=seed + 1)
         .materialize()
     )
@@ -136,8 +156,13 @@ class _DRDriver:
         treatment_name = str(data["treatment_col"])
         outcome_name = str(data["outcome_col"])
         dataset = cast(Any, self.dataset)
-        treated = dataset.filter(lambda row: int(row[treatment_name]) == 1)
-        control = dataset.filter(lambda row: int(row[treatment_name]) == 0)
+        dataset = dataset.map_batches(
+            _validate_treatment_batch,
+            batch_format="pandas",
+            fn_kwargs={"treatment_name": treatment_name},
+        )
+        treated = dataset.filter(lambda row: row[treatment_name] == 1)
+        control = dataset.filter(lambda row: row[treatment_name] == 0)
         treated_rows = int(treated.count())
         control_rows = int(control.count())
         rows = treated_rows + control_rows
@@ -209,15 +234,15 @@ class _DRDriver:
                 ),
             )
             heldout_data = cast(Any, heldout)
-            train_treated = train_data.filter(lambda row: int(row[treatment_name]) == 1)
-            train_control = train_data.filter(lambda row: int(row[treatment_name]) == 0)
+            train_treated = train_data.filter(lambda row: row[treatment_name] == 1)
+            train_control = train_data.filter(lambda row: row[treatment_name] == 0)
             train_treated_rows = int(train_treated.count())
             train_control_rows = int(train_control.count())
             heldout_treated_rows = int(
-                heldout_data.filter(lambda row: int(row[treatment_name]) == 1).count()
+                heldout_data.filter(lambda row: row[treatment_name] == 1).count()
             )
             heldout_control_rows = int(
-                heldout_data.filter(lambda row: int(row[treatment_name]) == 0).count()
+                heldout_data.filter(lambda row: row[treatment_name] == 0).count()
             )
             if (
                 train_treated_rows < self.plan.runtime.worker_count

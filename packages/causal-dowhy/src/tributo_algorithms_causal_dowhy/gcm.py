@@ -26,7 +26,7 @@ from tributo.exporting.models import (
 from tributo.exporting.service import BundleExportService
 
 STAGES = ("fit_gcm", "attribute_root_cause")
-_PACKAGE = "tributo-algorithms-causal-dowhy"
+_PACKAGE = "tributo-algorithms"
 
 
 def _canonical_digest(value: object) -> str:
@@ -508,10 +508,10 @@ def _report_query_onnx(report: Mapping[str, object]) -> bytes:
             ),
         ],
     )
-    built = helper.make_model(
+    built = helper.make_model_gen_version(
         graph,
         opset_imports=[helper.make_opsetid("", 18)],
-        producer_name="tributo-algorithms-causal-dowhy",
+        producer_name="tributo-algorithms",
     )
     onnx.checker.check_model(built)
     return cast(bytes, built.SerializeToString())

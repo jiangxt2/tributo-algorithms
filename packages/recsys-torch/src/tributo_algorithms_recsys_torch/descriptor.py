@@ -31,7 +31,7 @@ from tributo_algorithms_recsys_torch.contracts import (
     TwoTowerTorchCoverageValidator,
 )
 
-_PACKAGE = "tributo-algorithms-recsys-torch"
+_PACKAGE = "tributo-algorithms"
 _VERSION = "0.1.0"
 _ROOT = Path(__file__).resolve().parent
 
@@ -115,8 +115,8 @@ TWO_TOWER_DESCRIPTOR = AlgorithmBuilder.from_torch(
             "onnx>=1.16",
             "onnxruntime>=1.20",
             "torch>=2.5",
-            "tributo>=1,<2",
-            f"{_PACKAGE}=={_VERSION}",
+            "tributo>=1.1,<1.2",
+            f"tributo-algorithms[recsys-torch]=={_VERSION}",
         ),
     ),
     metric_reducers={"pair_accuracy": MetricReduction.SUM_COUNT},
@@ -125,7 +125,7 @@ TWO_TOWER_DESCRIPTOR = AlgorithmBuilder.from_torch(
     resources_per_worker=WorkerResources(num_cpus=1),
     package_name=_PACKAGE,
     package_version=_VERSION,
-    tributo_version_spec=">=1,<2",
+    tributo_version_spec=">=1.1,<1.2",
     policy=_POLICY,
     code_digest=_code_digest("recipe.py"),
     contract_bindings=_CONTRACTS,

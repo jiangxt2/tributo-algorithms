@@ -41,7 +41,7 @@ expected = {
 for entry_point in importlib.metadata.entry_points(group="tributo.algorithms"):
     distribution = getattr(entry_point, "dist", None)
     name = distribution.metadata["Name"] if distribution is not None else ""
-    if not name.startswith("tributo-algorithms-"):
+    if name.lower().replace("_", "-") != "tributo-algorithms":
         continue
     report = validate_installed_algorithm_package(
         entry_point.load(),

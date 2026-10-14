@@ -97,7 +97,7 @@ def export_sklearn_model(
             "framework": "sklearn",
             "framework_versions": {"scikit-learn": sklearn_version},
             "task_type": model.task,
-            "producer_distribution": "tributo-algorithms-classical",
+            "producer_distribution": "tributo-algorithms",
         },
         source_fingerprint=artifact.sha256,
         checkpoint_contract=ExportCheckpointV1(

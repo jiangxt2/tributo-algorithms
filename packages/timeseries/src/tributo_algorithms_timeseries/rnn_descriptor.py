@@ -33,7 +33,7 @@ from tributo_algorithms_timeseries.rnn_contracts import (
     RNNOutputValidator,
 )
 
-_PACKAGE = "tributo-algorithms-timeseries"
+_PACKAGE = "tributo-algorithms"
 _VERSION = "0.1.0"
 _ROOT = Path(__file__).resolve().parent
 
@@ -128,8 +128,8 @@ def _descriptor(
                 "onnx>=1.16",
                 "onnxruntime>=1.20",
                 "torch>=2.5",
-                "tributo>=1,<2",
-                f"{_PACKAGE}=={_VERSION}",
+                "tributo>=1.1,<1.2",
+                f"tributo-algorithms[timeseries]=={_VERSION}",
             ),
         ),
         metric_reducers={"accuracy": MetricReduction.SUM_COUNT},
@@ -138,7 +138,7 @@ def _descriptor(
         resources_per_worker=WorkerResources(num_cpus=1),
         package_name=_PACKAGE,
         package_version=_VERSION,
-        tributo_version_spec=">=1,<2",
+        tributo_version_spec=">=1.1,<1.2",
         policy=policy,
         code_digest=_code_digest("rnn_recipe.py"),
         contract_bindings=contracts,

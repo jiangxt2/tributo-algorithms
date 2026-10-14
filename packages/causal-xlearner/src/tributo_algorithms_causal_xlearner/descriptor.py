@@ -25,7 +25,7 @@ from tributo.training.algorithm_spec import (
 
 STAGES = ("mu0", "mu1", "tau0", "tau1", "propensity")
 
-_PACKAGE = "tributo-algorithms-causal-xlearner"
+_PACKAGE = "tributo-algorithms"
 _VERSION = "0.1.0"
 
 
@@ -73,13 +73,12 @@ X_LEARNER_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
     environment=EnvironmentSpec(
         environment_id="tributo.official.causal-xlearner.v1",
         dependencies=(
-            "tributo-algorithms-boosting==0.1.0",
             "xgboost>=2.1,<4",
             "onnx>=1.16",
             "onnxmltools>=1.13",
             "onnxruntime>=1.20",
-            "tributo>=1,<2",
-            f"{_PACKAGE}=={_VERSION}",
+            "tributo>=1.1,<1.2",
+            f"tributo-algorithms[causal-xlearner]=={_VERSION}",
         ),
     ),
     allowed_config_keys=("data", "model", "output", "ray", "training"),
@@ -97,7 +96,7 @@ X_LEARNER_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
     ),
     package_name=_PACKAGE,
     package_version=_VERSION,
-    tributo_version_spec=">=1,<2",
+    tributo_version_spec=">=1.1,<1.2",
     exporter="tributo_algorithms_causal_xlearner.exporter:export_result",
     flavor_id="official-x-learner-v1",
     contract_bindings=ContractBindingSet(

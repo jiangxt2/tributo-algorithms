@@ -23,7 +23,7 @@ from tributo.training.algorithm_spec import (
     ProblemType,
 )
 
-_PACKAGE = "tributo-algorithms-classical"
+_PACKAGE = "tributo-algorithms"
 _VERSION = "0.1.0"
 _INPUT = "tributo.official.tabular.unlabeled_dense.v1"
 _OUTPUT = "tributo.official.unsupervised.kmeans.clustering.v1"
@@ -87,8 +87,8 @@ def _descriptor(
                 "numpy>=2,<3",
                 "onnx>=1.16",
                 "onnxruntime>=1.20",
-                "tributo>=1,<2",
-                f"{_PACKAGE}=={_VERSION}",
+                "tributo>=1.1,<1.2",
+                f"tributo-algorithms[classical]=={_VERSION}",
             ),
         ),
         allowed_config_keys=(
@@ -114,7 +114,7 @@ def _descriptor(
         ),
         package_name=_PACKAGE,
         package_version=_VERSION,
-        tributo_version_spec=">=1,<2",
+        tributo_version_spec=">=1.1,<1.2",
         exporter="tributo_algorithms_classical.unsupervised_exporter:export_kmeans_model",
         flavor_id="onnx-runtime-v1",
         contract_bindings=ContractBindingSet(

@@ -1,4 +1,4 @@
-"""Verify descriptor-only conformance from an installed algorithm Wheel."""
+"""Verify descriptor-only conformance from the installed algorithm Wheel."""
 
 from __future__ import annotations
 
@@ -14,6 +14,10 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--distribution", required=True)
     parser.add_argument("--expected-entry-points", type=int)
+    parser.add_argument("--expected-exporters", type=int)
+    parser.add_argument("--expected-validators", type=int)
+    parser.add_argument("--expected-model-flavors", type=int)
+    parser.add_argument("--expected-extras", nargs="+")
     parser.add_argument("--require-scalar-single-column-binding", action="store_true")
     return parser
 
@@ -76,6 +80,37 @@ def _verify_scalar_single_column_binding() -> None:
 def main() -> None:
     args = _parser().parse_args()
     distribution = importlib.metadata.distribution(args.distribution)
+    actual_distribution = distribution.metadata["Name"].lower().replace("_", "-")
+    expected_distribution = args.distribution.lower().replace("_", "-")
+    if actual_distribution != expected_distribution:
+        raise ValueError(
+            f"requested distribution {expected_distribution!r} resolved to "
+            f"{actual_distribution!r}"
+        )
+    expected_plugin_counts = {
+        "tributo.exporters": args.expected_exporters,
+        "tributo.validators": args.expected_validators,
+        "tributo.model_flavors": args.expected_model_flavors,
+    }
+    plugin_counts = {
+        group: sum(
+            entry_point.group == group for entry_point in distribution.entry_points
+        )
+        for group in expected_plugin_counts
+    }
+    for group, expected_count in expected_plugin_counts.items():
+        if expected_count is not None and plugin_counts[group] != expected_count:
+            raise ValueError(
+                f"{args.distribution} has {plugin_counts[group]} {group} Entry Points, "
+                f"expected {expected_count}"
+            )
+    if args.expected_extras is not None:
+        actual_extras = set(distribution.metadata.get_all("Provides-Extra") or ())
+        if actual_extras != set(args.expected_extras):
+            raise ValueError(
+                f"{args.distribution} extras are {sorted(actual_extras)}, "
+                f"expected {sorted(args.expected_extras)}"
+            )
     entry_points = tuple(
         entry_point
         for entry_point in distribution.entry_points
@@ -107,6 +142,10 @@ def main() -> None:
             {
                 "distribution": distribution.metadata["Name"],
                 "entry_point_count": len(reports),
+                "exporter_count": plugin_counts["tributo.exporters"],
+                "validator_count": plugin_counts["tributo.validators"],
+                "model_flavor_count": plugin_counts["tributo.model_flavors"],
+                "extras": sorted(distribution.metadata.get_all("Provides-Extra") or ()),
                 "version": distribution.version,
             },
             sort_keys=True,

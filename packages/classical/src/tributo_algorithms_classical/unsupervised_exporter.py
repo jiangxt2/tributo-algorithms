@@ -66,9 +66,9 @@ def _onnx_metadata(
         [output_info],
         initializer=initializers,
     )
-    model_proto = helper.make_model(
+    model_proto = helper.make_model_gen_version(
         graph,
-        producer_name="tributo-algorithms-classical",
+        producer_name="tributo-algorithms",
         opset_imports=[helper.make_operatorsetid("", 18)],
     )
     model_proto.metadata_props.add(
@@ -132,9 +132,9 @@ def _kmeans_onnx(model: KMeansModel, plan: ResolvedAlgorithmPlan) -> bytes:
         [labels, distance],
         initializer=initializers,
     )
-    model_proto = helper.make_model(
+    model_proto = helper.make_model_gen_version(
         graph,
-        producer_name="tributo-algorithms-classical",
+        producer_name="tributo-algorithms",
         opset_imports=[helper.make_operatorsetid("", 18)],
     )
     model_proto.metadata_props.add(
@@ -183,7 +183,7 @@ def _bundle_result(
             "framework": "onnx",
             "framework_versions": {"onnx": "18"},
             "task_type": task_type,
-            "producer_distribution": "tributo-algorithms-classical",
+            "producer_distribution": "tributo-algorithms",
         },
         source_fingerprint=artifact.sha256,
         checkpoint_contract=ExportCheckpointV1(

@@ -1,33 +1,21 @@
-name: Release package
+name: Release aggregate distribution
 
 on:
   push:
     tags:
-      - "*-v*"
+      - "tributo-algorithms-v*"
 
 permissions:
   contents: read
-  id-token: write
-
-env:
-  TRIBUTO_CORE_REF: cdb247c801dee816fdcccdd96d1ddc6f59f7d77d
 
 jobs:
-  build-and-publish:
+  build:
     runs-on: ubuntu-latest
-    environment: pypi
-    defaults:
-      run:
-        working-directory: workspace/tributo-algorithms
+    outputs:
+      distribution: ${{ steps.release.outputs.distribution }}
+      version: ${{ steps.release.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: workspace/tributo-algorithms
-      - uses: actions/checkout@v4
-        with:
-          repository: jiangxt2/Tributo
-          path: Tributo
-          ref: ${{ env.TRIBUTO_CORE_REF }}
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.11.23"
@@ -35,24 +23,110 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv lock --check
-      - name: Resolve package from tag
+      - name: Resolve the aggregate release tag
+        id: release
         run: >-
           python scripts/resolve_release_package.py
           --tag "${GITHUB_REF_NAME}"
-          --github-env "${GITHUB_ENV}"
-      - name: Build the exact package without local sources
-        run: uv build --no-sources --package "${DISTRIBUTION}"
-      - name: Verify the release Wheel without local sources
-        run: |
-          uv build --wheel --no-sources --out-dir "${RUNNER_TEMP}/tributo-core-dist" ../../Tributo
-          uv venv "${RUNNER_TEMP}/tributo-release-check"
-          uv pip install --python "${RUNNER_TEMP}/tributo-release-check/bin/python" \
-            "${RUNNER_TEMP}"/tributo-core-dist/tributo-*.whl \
-            dist/*.whl
-          "${RUNNER_TEMP}/tributo-release-check/bin/python" \
-            scripts/verify_installed_distribution.py \
-            --distribution "${DISTRIBUTION}" \
-            --require-scalar-single-column-binding
+          --github-output "${GITHUB_OUTPUT}"
+      - name: Build the Wheel and source distribution once
+        run: uv build --no-sources
+      - name: Record artifact checksums
+        run: sha256sum dist/*.whl dist/*.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tributo-algorithms-dist
+          path: |
+            dist/
+            SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-testpypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: tributo-algorithms-dist
+          path: .
+      - run: sha256sum --check SHA256SUMS
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          packages-dir: workspace/tributo-algorithms/dist/
+          packages-dir: dist/
+          repository-url: https://test.pypi.org/legacy/
+
+  verify-testpypi:
+    needs: [build, publish-testpypi]
+    runs-on: ubuntu-latest
+    env:
+      DISTRIBUTION: ${{ needs.build.outputs.distribution }}
+      PACKAGE_VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.23"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: tributo-algorithms-dist
+          path: .
+      - run: sha256sum --check SHA256SUMS
+      - name: Wait for TestPyPI to index the release
+        run: |
+          for attempt in $(seq 1 18); do
+            if curl --fail --silent --show-error \
+              "https://test.pypi.org/pypi/${DISTRIBUTION}/${PACKAGE_VERSION}/json" \
+              --output /dev/null; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "TestPyPI did not index ${DISTRIBUTION} ${PACKAGE_VERSION}" >&2
+          exit 1
+      - name: Install from TestPyPI and verify published metadata
+        run: |
+          uv venv "${RUNNER_TEMP}/tributo-algorithms-testpypi"
+          uv pip install \
+            --python "${RUNNER_TEMP}/tributo-algorithms-testpypi/bin/python" \
+            --default-index https://pypi.org/simple \
+            dist/tributo_algorithms-*.whl
+          uv pip install \
+            --python "${RUNNER_TEMP}/tributo-algorithms-testpypi/bin/python" \
+            --no-deps --reinstall-package "${DISTRIBUTION}" \
+            --default-index https://test.pypi.org/simple \
+            "${DISTRIBUTION}==${PACKAGE_VERSION}"
+          uv pip check --python "${RUNNER_TEMP}/tributo-algorithms-testpypi/bin/python"
+          "${RUNNER_TEMP}/tributo-algorithms-testpypi/bin/python" \
+            scripts/verify_installed_distribution.py \
+            --distribution "${DISTRIBUTION}" \
+            --expected-entry-points 37 \
+            --expected-exporters 9 \
+            --expected-validators 1 \
+            --expected-model-flavors 3 \
+            --expected-extras all boosting catboost causal-core causal-discovery causal-dowhy \
+              causal-dr causal-xlearner classical graph-pyg multistage-torch recsys-torch \
+              representation tabular-torch timeseries transformers-nlp \
+            --require-scalar-single-column-binding
+
+  publish-pypi:
+    needs: [build, verify-testpypi]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: tributo-algorithms-dist
+          path: .
+      - run: sha256sum --check SHA256SUMS
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

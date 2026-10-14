@@ -650,7 +650,7 @@ class DistributedJaggedEmbedding(RayTorchAdapter):
                     "framework": "pytorch",
                     "task_type": "ranking",
                     "sparse_routing": "all_to_all_single_owner_mod",
-                    "producer_distribution": "tributo-algorithms-recsys-torch",
+                    "producer_distribution": "tributo-algorithms",
                 },
                 source_fingerprint=_state_digest(
                     cast(Mapping[str, object], model.state_dict())

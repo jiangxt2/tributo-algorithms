@@ -489,7 +489,7 @@ class DistributedDistillation(RayTorchAdapter):
                     "framework": "pytorch",
                     "task_type": "binary_classification",
                     "component_stages": ["teacher", "student"],
-                    "producer_distribution": "tributo-algorithms-multistage-torch",
+                    "producer_distribution": "tributo-algorithms",
                 },
                 source_fingerprint=_state_digest(
                     cast(Mapping[str, object], model.state_dict())

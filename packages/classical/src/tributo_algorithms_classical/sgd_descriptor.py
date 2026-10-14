@@ -22,7 +22,7 @@ from tributo.training.algorithm_spec import (
     ProblemType,
 )
 
-_PACKAGE = "tributo-algorithms-classical"
+_PACKAGE = "tributo-algorithms"
 _VERSION = "0.1.0"
 _INPUT = "tributo.official.tabular.labeled.v1"
 _COVERAGE = "tributo.official.distributed.coverage.v1"
@@ -80,8 +80,8 @@ def _descriptor(
                 "onnxruntime>=1.20",
                 "scikit-learn>=1.4,<2",
                 "skl2onnx>=1.17",
-                "tributo>=1,<2",
-                f"{_PACKAGE}=={_VERSION}",
+                "tributo>=1.1,<1.2",
+                f"tributo-algorithms[classical]=={_VERSION}",
             ),
         ),
         allowed_config_keys=(
@@ -104,7 +104,7 @@ def _descriptor(
         ),
         package_name=_PACKAGE,
         package_version=_VERSION,
-        tributo_version_spec=">=1,<2",
+        tributo_version_spec=">=1.1,<1.2",
         exporter="tributo_algorithms_classical.exporter:export_sklearn_model",
         flavor_id="onnx-runtime-v1",
         contract_bindings=ContractBindingSet(

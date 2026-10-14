@@ -19,7 +19,7 @@ from tributo.training.algorithm_spec import AlgorithmSpec, Capability, ProblemTy
 
 STAGES = ("mu0", "mu1", "propensity")
 
-_PACKAGE = "tributo-algorithms-causal-dr"
+_PACKAGE = "tributo-algorithms"
 _VERSION = "0.1.0"
 
 
@@ -64,11 +64,9 @@ DR_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
     environment=EnvironmentSpec(
         environment_id="tributo.official.causal-dr.v1",
         dependencies=(
-            "tributo-algorithms-boosting==0.1.0",
-            "tributo-algorithms-causal-core==0.1.0",
             "xgboost>=2.1,<4",
-            "tributo>=1,<2",
-            f"{_PACKAGE}=={_VERSION}",
+            "tributo>=1.1,<1.2",
+            f"tributo-algorithms[causal-dr]=={_VERSION}",
         ),
     ),
     allowed_config_keys=("data", "model", "output", "ray", "training"),
@@ -86,7 +84,7 @@ DR_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
     ),
     package_name=_PACKAGE,
     package_version=_VERSION,
-    tributo_version_spec=">=1,<2",
+    tributo_version_spec=">=1.1,<1.2",
     exporter="tributo_algorithms_causal_dr.algorithm:export_result",
     flavor_id="onnx-runtime-v1",
     contract_bindings=ContractBindingSet(

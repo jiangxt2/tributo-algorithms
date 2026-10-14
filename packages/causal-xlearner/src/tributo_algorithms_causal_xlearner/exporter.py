@@ -174,8 +174,28 @@ class XLearnerONNXExporter:
                 )
             node = copy.deepcopy(model.graph.node[0])
             node.name = stage
-            node.output[0] = stage
-            nodes.append(node)
+            if stage == "propensity":
+                if node.op_type != "TreeEnsembleClassifier" or len(node.output) != 2:
+                    raise AlgorithmExecutionError(
+                        "X-Learner propensity conversion requires label and probability outputs"
+                    )
+                node.output[0] = "propensity_label"
+                node.output[1] = "propensity_probabilities"
+                nodes.extend(
+                    [
+                        node,
+                        helper.make_node(
+                            "Gather",
+                            ["propensity_probabilities", "positive_class_index"],
+                            ["propensity"],
+                            name="propensity_positive_class",
+                            axis=1,
+                        ),
+                    ]
+                )
+            else:
+                node.output[0] = stage
+                nodes.append(node)
 
         def constant(name: str, value: float) -> Any:
             return helper.make_node(
@@ -229,14 +249,17 @@ class XLearnerONNXExporter:
                 )
             ],
             [helper.make_tensor_value_info("cate", TensorProto.FLOAT, [None, 1])],
+            initializer=[
+                helper.make_tensor("positive_class_index", TensorProto.INT64, [1], [1])
+            ],
         )
-        model = helper.make_model(
+        model = helper.make_model_gen_version(
             graph,
             opset_imports=[
                 helper.make_operatorsetid("", 15),
                 helper.make_operatorsetid("ai.onnx.ml", 3),
             ],
-            producer_name="tributo-algorithms-causal-xlearner",
+            producer_name="tributo-algorithms",
         )
         onnx.checker.check_model(model)
         (context.artifact_dir / "model.onnx").write_bytes(model.SerializeToString())

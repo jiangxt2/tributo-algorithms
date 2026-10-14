@@ -1,14 +1,16 @@
-"""Static contracts for reproducible CI and release source layout."""
+"""Static contracts for the aggregate package and its CI/release flow."""
 
 from __future__ import annotations
 
 import importlib.util
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from types import ModuleType
 
 import pytest
+from packaging.requirements import Requirement
 
 _ROOT = Path(__file__).resolve().parents[1]
 _RESOLVER = _ROOT / "scripts" / "resolve_release_package.py"
@@ -35,23 +37,22 @@ def _verifier_module() -> ModuleType:
     return module
 
 
-def test_release_tag_resolves_exact_workspace_package() -> None:
+def test_release_tag_resolves_the_single_distribution() -> None:
     resolver = _resolver_module()
 
-    release = resolver.resolve_release_package(_ROOT, "classical-v0.1.0")
+    release = resolver.resolve_release_package(_ROOT, "tributo-algorithms-v0.1.0")
 
-    assert release.directory == "classical"
-    assert release.distribution == "tributo-algorithms-classical"
+    assert release.distribution == "tributo-algorithms"
     assert release.version == "0.1.0"
 
 
 @pytest.mark.parametrize(
     "tag, message",
     [
-        ("classical-0.1.0", "must match"),
-        ("../classical-v0.1.0", "must match"),
-        ("unknown-v0.1.0", "unknown package"),
-        ("classical-v0.2.0", "does not match package version"),
+        ("tributo-algorithms-0.1.0", "must match"),
+        ("../tributo-algorithms-v0.1.0", "must match"),
+        ("unknown-v0.1.0", "must match"),
+        ("tributo-algorithms-v0.2.0", "does not match project version"),
     ],
 )
 def test_release_tag_rejects_unsafe_or_inconsistent_values(
@@ -64,8 +65,8 @@ def test_release_tag_rejects_unsafe_or_inconsistent_values(
         resolver.resolve_release_package(_ROOT, tag)
 
 
-def test_release_resolver_writes_github_environment(tmp_path: Path) -> None:
-    github_env = tmp_path / "github-env"
+def test_release_resolver_writes_github_step_outputs(tmp_path: Path) -> None:
+    github_output = tmp_path / "github-output"
 
     result = subprocess.run(
         [
@@ -74,9 +75,9 @@ def test_release_resolver_writes_github_environment(tmp_path: Path) -> None:
             "--root",
             str(_ROOT),
             "--tag",
-            "graph-pyg-v0.1.0",
-            "--github-env",
-            str(github_env),
+            "tributo-algorithms-v0.1.0",
+            "--github-output",
+            str(github_output),
         ],
         check=False,
         capture_output=True,
@@ -84,60 +85,89 @@ def test_release_resolver_writes_github_environment(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert github_env.read_text(encoding="utf-8").splitlines() == [
-        "PACKAGE_DIRECTORY=graph-pyg",
-        "DISTRIBUTION=tributo-algorithms-graph-pyg",
-        "PACKAGE_VERSION=0.1.0",
+    assert github_output.read_text(encoding="utf-8").splitlines() == [
+        "distribution=tributo-algorithms",
+        "version=0.1.0",
     ]
 
 
-def test_workflows_use_the_portable_nested_checkout_layout() -> None:
+def test_root_metadata_declares_one_distribution_and_all_domain_extras() -> None:
+    project = tomllib.loads((_ROOT / "pyproject.toml").read_text())
+
+    assert project["project"]["name"] == "tributo-algorithms"
+    assert project["project"]["dependencies"] == ["tributo>=1.1,<1.2"]
+    entry_points = project["project"]["entry-points"]
+    assert len(entry_points["tributo.algorithms"]) == 37
+    assert len(entry_points["tributo.exporters"]) == 9
+    assert len(entry_points["tributo.validators"]) == 1
+    assert len(entry_points["tributo.model_flavors"]) == 3
+
+    extras = project["project"]["optional-dependencies"]
+    assert set(extras) == {
+        "all",
+        "boosting",
+        "catboost",
+        "causal-core",
+        "causal-discovery",
+        "causal-dowhy",
+        "causal-dr",
+        "causal-xlearner",
+        "classical",
+        "graph-pyg",
+        "multistage-torch",
+        "recsys-torch",
+        "representation",
+        "tabular-torch",
+        "timeseries",
+        "transformers-nlp",
+    }
+    assert all(
+        not dependency.startswith("tributo-algorithms-")
+        for dependencies in extras.values()
+        for dependency in dependencies
+    )
+    all_dependencies = {Requirement(value).name for value in extras["all"]}
+    assert all(
+        {Requirement(value).name for value in dependencies} <= all_dependencies
+        for extra, dependencies in extras.items()
+        if extra != "all"
+    )
+    assert "torch>=2.5,<2.14" in extras["graph-pyg"]
+    assert "torch>=2.5,<2.14" in extras["all"]
+    assert not list((_ROOT / "packages").glob("*/pyproject.toml"))
+
+
+def test_ci_and_release_workflows_cover_single_artifact_flow() -> None:
     ci = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     release = (_ROOT / ".github" / "workflows" / "release.yml").read_text(
         encoding="utf-8"
     )
 
-    for workflow in (ci, release):
-        assert "path: workspace/tributo-algorithms" in workflow
-        assert "path: Tributo" in workflow
-        assert "working-directory: workspace/tributo-algorithms" in workflow
-        assert "ref: ${{ env.TRIBUTO_CORE_REF }}" in workflow
-        assert "uv lock --check" in workflow
-        assert "--no-sources" in workflow
-        assert "verify_installed_distribution.py" in workflow
-        assert "--require-scalar-single-column-binding" in workflow
-        assert "cdb247c801dee816fdcccdd96d1ddc6f59f7d77d" in workflow
-    assert "branches: [master]" in ci
-    assert "branches: [main]" not in ci
-    assert "resolve_release_package.py" in release
-    assert "packages-dir: workspace/tributo-algorithms/dist/" in release
-
-
-def test_ci_checks_python_matrix_and_independent_algorithm_wheels() -> None:
-    ci = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    dowhy_project = (_ROOT / "packages" / "causal-dowhy" / "pyproject.toml").read_text(
-        encoding="utf-8"
-    )
-
     assert 'python-version: ["3.12", "3.13"]' in ci
-    assert "python-version: ${{ matrix.python-version }}" in ci
-    assert "Verify source-free Wheels for XGBoost and causal algorithms" in ci
-    assert '"dowhy>=0.14,<0.15"' in dowhy_project
+    assert "uv sync --locked --extra all --group dev" in ci
+    assert "uv build --no-sources" in ci
+    assert "--distribution tributo-algorithms" in ci
+    assert "--expected-entry-points 37" in ci
+    assert "--expected-exporters 9" in ci
+    assert "--expected-validators 1" in ci
+    assert "--expected-model-flavors 3" in ci
+    assert "--expected-extras all boosting" in ci
+    assert "branches: [master]" in ci
+    assert "path: Tributo" not in ci
+    assert "TRIBUTO_CORE_REF" not in ci
 
-    expected_distributions = {
-        "tributo-algorithms-boosting": 2,
-        "tributo-algorithms-causal-core": 3,
-        "tributo-algorithms-causal-discovery": 1,
-        "tributo-algorithms-causal-dr": 1,
-        "tributo-algorithms-causal-xlearner": 1,
-        "tributo-algorithms-causal-dowhy": 2,
-    }
-    for distribution, entry_point_count in expected_distributions.items():
-        assert distribution in ci
-        assert (
-            f"--distribution {distribution} --expected-entry-points {entry_point_count}"
-            in ci
-        )
+    assert '"tributo-algorithms-v*"' in release
+    assert "repository-url: https://test.pypi.org/legacy/" in release
+    assert "--extra-index-url" not in release
+    assert "--default-index https://pypi.org/simple" in release
+    assert "--default-index https://test.pypi.org/simple" in release
+    assert '--no-deps --reinstall-package "${DISTRIBUTION}"' in release
+    assert "--expected-exporters 9" in release
+    assert "--expected-extras all boosting" in release
+    assert "needs: [build, verify-testpypi]" in release
+    assert "sha256sum --check SHA256SUMS" in release
+    assert release.count("uses: pypa/gh-action-pypi-publish@release/v1") == 2
+    assert "id-token: write" in release
 
 
 def test_source_free_verifier_exercises_scalar_binding_contract() -> None:

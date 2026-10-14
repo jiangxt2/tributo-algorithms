@@ -31,7 +31,7 @@ from tributo.algorithms.api import (
 from tributo.algorithms.spi import AlgorithmExecutionContext, MapReduceAlgorithm
 from tributo.training.algorithm_spec import AlgorithmSpec, Capability, ProblemType
 
-_PACKAGE = "tributo-algorithms-causal-core"
+_PACKAGE = "tributo-algorithms"
 _VERSION = "0.1.0"
 _STATE_SCHEMA = (
     StateField("treated_count", "int64", ()),
@@ -1032,8 +1032,8 @@ ATE_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
             "numpy>=2,<3",
             "scikit-learn>=1.4,<2",
             "skl2onnx>=1.17",
-            "tributo>=1,<2",
-            f"{_PACKAGE}=={_VERSION}",
+            "tributo>=1.1,<1.2",
+            f"tributo-algorithms[causal-core]=={_VERSION}",
         ),
     ),
     allowed_config_keys=("confidence_z", "output", "policy_cost", "treatment_col"),
@@ -1056,7 +1056,7 @@ ATE_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
     ),
     package_name=_PACKAGE,
     package_version=_VERSION,
-    tributo_version_spec=">=1,<2",
+    tributo_version_spec=">=1.1,<1.2",
     exporter="tributo_algorithms_causal_core.algorithm:export_model",
     flavor_id="onnx-runtime-v1",
     contract_bindings=ContractBindingSet(
@@ -1108,7 +1108,7 @@ LINEAR_DML_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
     ),
     package_name=_PACKAGE,
     package_version=_VERSION,
-    tributo_version_spec=">=1,<2",
+    tributo_version_spec=">=1.1,<1.2",
     exporter="tributo_algorithms_causal_core.algorithm:export_model",
     flavor_id="onnx-runtime-v1",
     contract_bindings=ContractBindingSet(
@@ -1163,7 +1163,7 @@ LINEAR_IV_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
     ),
     package_name=_PACKAGE,
     package_version=_VERSION,
-    tributo_version_spec=">=1,<2",
+    tributo_version_spec=">=1.1,<1.2",
     exporter="tributo_algorithms_causal_core.algorithm:export_model",
     flavor_id="onnx-runtime-v1",
     contract_bindings=ContractBindingSet(

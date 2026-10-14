@@ -22,7 +22,7 @@ from tributo.training.algorithm_spec import (
     ProblemType,
 )
 
-_PACKAGE = "tributo-algorithms-boosting"
+_PACKAGE = "tributo-algorithms"
 _VERSION = "0.1.0"
 _INPUT = "tributo.algorithm-input.ray-tabular.v1"
 _OUTPUT = "tributo.official.lightgbm.onnx.v1"
@@ -75,8 +75,8 @@ LIGHTGBM_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
         dependencies=(
             "lightgbm>=4.5,<5",
             "onnxmltools>=1.13",
-            "tributo>=1,<2",
-            f"{_PACKAGE}=={_VERSION}",
+            "tributo>=1.1,<1.2",
+            f"tributo-algorithms[boosting]=={_VERSION}",
         ),
     ),
     allowed_config_keys=("data", "model", "output", "ray", "resource", "training"),
@@ -92,7 +92,7 @@ LIGHTGBM_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
     ),
     package_name=_PACKAGE,
     package_version=_VERSION,
-    tributo_version_spec=">=1,<2",
+    tributo_version_spec=">=1.1,<1.2",
     exporter="tributo_algorithms_boosting.lightgbm:export_result",
     flavor_id="onnx-runtime-v1",
     contract_bindings=ContractBindingSet(

@@ -31,7 +31,7 @@ from tributo_algorithms_multistage_torch.contracts import (
     DistillationTorchInputValidator,
 )
 
-_PACKAGE = "tributo-algorithms-multistage-torch"
+_PACKAGE = "tributo-algorithms"
 _VERSION = "0.1.0"
 _ROOT = Path(__file__).resolve().parent
 
@@ -121,8 +121,8 @@ DISTILLATION_DESCRIPTOR = AlgorithmBuilder.from_torch_adapter(
             "onnxruntime>=1.20",
             "safetensors>=0.4.3",
             "torch>=2.5",
-            "tributo>=1,<2",
-            f"{_PACKAGE}=={_VERSION}",
+            "tributo>=1.1,<1.2",
+            f"tributo-algorithms[multistage-torch]=={_VERSION}",
         ),
     ),
     metric_reducers={
@@ -135,7 +135,7 @@ DISTILLATION_DESCRIPTOR = AlgorithmBuilder.from_torch_adapter(
     resources_per_worker=WorkerResources(num_cpus=1),
     package_name=_PACKAGE,
     package_version=_VERSION,
-    tributo_version_spec=">=1,<2",
+    tributo_version_spec=">=1.1,<1.2",
     policy=_POLICY,
     code_digest=_code_digest(),
     contract_bindings=_CONTRACTS,

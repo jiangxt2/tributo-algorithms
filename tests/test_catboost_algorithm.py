@@ -36,7 +36,7 @@ def _plan() -> ResolvedAlgorithmPlan:
 
 
 def test_catboost_descriptor_is_independent_and_conditional() -> None:
-    assert CATBOOST_DESCRIPTOR.package_name == "tributo-algorithms-catboost"
+    assert CATBOOST_DESCRIPTOR.package_name == "tributo-algorithms"
     assert CATBOOST_DESCRIPTOR.registration.distribution_spec is not None
     assert (
         CATBOOST_DESCRIPTOR.registration.distribution_spec.policy.exactness.value

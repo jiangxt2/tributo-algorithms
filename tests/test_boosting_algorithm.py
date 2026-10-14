@@ -18,7 +18,7 @@ from tributo_algorithms_boosting.native import (
 
 def test_official_xgboost_owns_the_portable_algorithm_spec() -> None:
     assert XGBOOST_DESCRIPTOR.name == "xgboost"
-    assert XGBOOST_DESCRIPTOR.package_name == "tributo-algorithms-boosting"
+    assert XGBOOST_DESCRIPTOR.package_name == "tributo-algorithms"
     distribution = XGBOOST_DESCRIPTOR.registration.distribution_spec
     assert distribution is not None
     assert distribution.strategy is DistributionStrategy.FRAMEWORK_NATIVE

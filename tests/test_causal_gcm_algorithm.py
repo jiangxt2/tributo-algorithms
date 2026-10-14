@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import numpy as np
+import pytest
 from tributo.algorithms.api import DistributionStrategy, FrameworkNativePolicy
 from tributo.exporting.bundle_reader import BundleReader
 from tributo.exporting.runtime import BundleModelLoader
@@ -87,9 +88,13 @@ def test_gcm_coverage_requires_anomaly_and_stage_evidence() -> None:
     assert GCMCoverageValidator().validate(value) == value
 
 
-def test_gcm_report_query_is_exact_and_marks_invalid_nodes() -> None:
+def test_gcm_report_query_is_exact_and_marks_invalid_nodes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import onnx
     import onnxruntime as ort
 
+    monkeypatch.setattr(onnx, "IR_VERSION", 999)
     report = {
         "nodes": ["x", "y"],
         "root_cause_attribution": {

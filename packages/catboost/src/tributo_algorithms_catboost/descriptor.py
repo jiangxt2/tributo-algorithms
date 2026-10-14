@@ -23,7 +23,7 @@ from tributo.training.algorithm_spec import (
     ProblemType,
 )
 
-_PACKAGE = "tributo-algorithms-catboost"
+_PACKAGE = "tributo-algorithms"
 _VERSION = "0.1.0"
 _INPUT = "tributo.official.tabular.labeled.v1"
 _OUTPUT = "tributo.official.catboost.native.v1"
@@ -77,8 +77,8 @@ CATBOOST_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
         dependencies=(
             "catboost>=1.2,<2",
             "onnxruntime>=1.20",
-            "tributo>=1,<2",
-            f"{_PACKAGE}=={_VERSION}",
+            "tributo>=1.1,<1.2",
+            f"tributo-algorithms[catboost]=={_VERSION}",
         ),
     ),
     allowed_config_keys=(
@@ -96,7 +96,7 @@ CATBOOST_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
     resources_per_worker=WorkerResources(num_cpus=1),
     package_name=_PACKAGE,
     package_version=_VERSION,
-    tributo_version_spec=">=1,<2",
+    tributo_version_spec=">=1.1,<1.2",
     policy=ParallelEnsemblePolicy(
         max_units=256,
         max_retries=1,

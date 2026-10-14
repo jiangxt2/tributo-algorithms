@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12, <3.14"
 resolution-markers = [
     "python_full_version >= '3.13' and sys_platform == 'win32'",
@@ -7,34 +7,8 @@ resolution-markers = [
     "python_full_version >= '3.13' and sys_platform != 'emscripten' and sys_platform != 'win32'",
     "python_full_version < '3.13' and sys_platform == 'win32'",
     "python_full_version < '3.13' and sys_platform == 'emscripten'",
-    "python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-]
-
-[manifest]
-members = [
-    "tributo-algorithms-boosting",
-    "tributo-algorithms-catboost",
-    "tributo-algorithms-causal-core",
-    "tributo-algorithms-causal-discovery",
-    "tributo-algorithms-causal-dowhy",
-    "tributo-algorithms-causal-dr",
-    "tributo-algorithms-causal-xlearner",
-    "tributo-algorithms-classical",
-    "tributo-algorithms-graph-pyg",
-    "tributo-algorithms-multistage-torch",
-    "tributo-algorithms-recsys-torch",
-    "tributo-algorithms-representation",
-    "tributo-algorithms-tabular-torch",
-    "tributo-algorithms-timeseries",
-    "tributo-algorithms-transformers-nlp",
-]
-
-[manifest.dependency-groups]
-dev = [
-    { name = "mypy", specifier = ">=2.3.0" },
-    { name = "pytest", specifier = ">=9.0.2" },
-    { name = "pytest-timeout", specifier = ">=2.4.0" },
-    { name = "ruff", specifier = ">=0.15.0,<1.0" },
+    "(python_full_version < '3.13' and platform_machine != 'arm64' and sys_platform == 'darwin') or (python_full_version < '3.13' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32')",
+    "python_full_version < '3.13' and platform_machine == 'arm64' and sys_platform == 'darwin'",
 ]
 
 [[package]]
@@ -280,7 +254,8 @@ dependencies = [
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
     { name = "pandas" },
     { name = "plotly" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.13' and platform_machine != 'arm64') or (python_full_version < '3.13' and sys_platform != 'darwin')" },
+    { name = "scipy", version = "1.15.3", source = { url = "https://files.pythonhosted.org/packages/7b/7e/f30be3d03de07f25dc0ec926d1681fed5c732d759ac8f51079708c79e680/scipy-1.15.3-cp312-cp312-macosx_12_0_arm64.whl" }, marker = "python_full_version < '3.13' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
     { name = "six" },
 ]
@@ -311,7 +286,8 @@ dependencies = [
     { name = "pandas" },
     { name = "pydot" },
     { name = "scikit-learn" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.13' and platform_machine != 'arm64') or (python_full_version < '3.13' and sys_platform != 'darwin')" },
+    { name = "scipy", version = "1.15.3", source = { url = "https://files.pythonhosted.org/packages/7b/7e/f30be3d03de07f25dc0ec926d1681fed5c732d759ac8f51079708c79e680/scipy-1.15.3-cp312-cp312-macosx_12_0_arm64.whl" }, marker = "python_full_version < '3.13' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
     { name = "statsmodels" },
     { name = "tqdm" },
@@ -437,7 +413,8 @@ dependencies = [
     { name = "cffi" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.13' and platform_machine != 'arm64') or (python_full_version < '3.13' and sys_platform != 'darwin')" },
+    { name = "scipy", version = "1.15.3", source = { url = "https://files.pythonhosted.org/packages/7b/7e/f30be3d03de07f25dc0ec926d1681fed5c732d759ac8f51079708c79e680/scipy-1.15.3-cp312-cp312-macosx_12_0_arm64.whl" }, marker = "python_full_version < '3.13' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/81/e2/47f692161779dbd98876015de934943effb667a014e6f79a6d746b3e4c2a/clarabel-0.11.1.tar.gz", hash = "sha256:e7c41c47f0e59aeab99aefff9e58af4a8753ee5269bbeecbd5526fc6f41b9598", size = 253949, upload-time = "2025-06-11T16:49:05.864Z" }
@@ -646,7 +623,8 @@ dependencies = [
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
     { name = "osqp" },
     { name = "qdldl" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.13' and platform_machine != 'arm64') or (python_full_version < '3.13' and sys_platform != 'darwin')" },
+    { name = "scipy", version = "1.15.3", source = { url = "https://files.pythonhosted.org/packages/7b/7e/f30be3d03de07f25dc0ec926d1681fed5c732d759ac8f51079708c79e680/scipy-1.15.3-cp312-cp312-macosx_12_0_arm64.whl" }, marker = "python_full_version < '3.13' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
     { name = "scs" },
     { name = "sparsediffpy" },
@@ -724,7 +702,8 @@ dependencies = [
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
     { name = "pandas" },
     { name = "scikit-learn" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.13' and platform_machine != 'arm64') or (python_full_version < '3.13' and sys_platform != 'darwin')" },
+    { name = "scipy", version = "1.15.3", source = { url = "https://files.pythonhosted.org/packages/7b/7e/f30be3d03de07f25dc0ec926d1681fed5c732d759ac8f51079708c79e680/scipy-1.15.3-cp312-cp312-macosx_12_0_arm64.whl" }, marker = "python_full_version < '3.13' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
     { name = "statsmodels" },
     { name = "sympy" },
@@ -1181,7 +1160,8 @@ dependencies = [
     { name = "narwhals" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.13' and platform_machine != 'arm64') or (python_full_version < '3.13' and sys_platform != 'darwin')" },
+    { name = "scipy", version = "1.15.3", source = { url = "https://files.pythonhosted.org/packages/7b/7e/f30be3d03de07f25dc0ec926d1681fed5c732d759ac8f51079708c79e680/scipy-1.15.3-cp312-cp312-macosx_12_0_arm64.whl" }, marker = "python_full_version < '3.13' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/63/8e/4db5e29290d7e619c307fdb8dab0a0514090af2ce3ec483050e024ec6126/lightgbm-4.7.0.tar.gz", hash = "sha256:f8e20f682c9aabd000bcf4a7ed8aa6f473c1adfecccae34ec24e823d156f4af0", size = 1792896, upload-time = "2026-07-18T21:00:56.139Z" }
@@ -1320,7 +1300,8 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.13' and platform_machine != 'arm64') or (python_full_version < '3.13' and sys_platform != 'darwin')" },
+    { name = "scipy", version = "1.15.3", source = { url = "https://files.pythonhosted.org/packages/7b/7e/f30be3d03de07f25dc0ec926d1681fed5c732d759ac8f51079708c79e680/scipy-1.15.3-cp312-cp312-macosx_12_0_arm64.whl" }, marker = "python_full_version < '3.13' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/92/e7/def9d879d424bc934e9e43b3455e28cd2ac76ace81cdc94be803ea78d29f/momentchi2-0.1.8.tar.gz", hash = "sha256:95d4becfd181d447c0281292c5827d74a09b04c38bd312da48a8a08932e8de1f", size = 11748, upload-time = "2021-08-27T18:56:23.571Z" }
@@ -1513,7 +1494,8 @@ source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version < '3.13' and sys_platform == 'win32'",
     "python_full_version < '3.13' and sys_platform == 'emscripten'",
-    "python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "(python_full_version < '3.13' and platform_machine != 'arm64' and sys_platform == 'darwin') or (python_full_version < '3.13' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32')",
+    "python_full_version < '3.13' and platform_machine == 'arm64' and sys_platform == 'darwin'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d0/ad/fed0499ce6a338d2a03ebae59cd15093910c8875328855781952abf6c2fe/numpy-2.4.6.tar.gz", hash = "sha256:f3a3570c4a2a16746ac2c31a7c7c7b0c186b95ce902e33db6f28094ed7387dda", size = 20735807, upload-time = "2026-05-18T23:37:14.07Z" }
 wheels = [
@@ -1934,7 +1916,8 @@ dependencies = [
     { name = "joblib" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.13' and platform_machine != 'arm64') or (python_full_version < '3.13' and sys_platform != 'darwin')" },
+    { name = "scipy", version = "1.15.3", source = { url = "https://files.pythonhosted.org/packages/7b/7e/f30be3d03de07f25dc0ec926d1681fed5c732d759ac8f51079708c79e680/scipy-1.15.3-cp312-cp312-macosx_12_0_arm64.whl" }, marker = "python_full_version < '3.13' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
     { name = "setuptools" },
 ]
@@ -2445,7 +2428,8 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.13' and platform_machine != 'arm64') or (python_full_version < '3.13' and sys_platform != 'darwin')" },
+    { name = "scipy", version = "1.15.3", source = { url = "https://files.pythonhosted.org/packages/7b/7e/f30be3d03de07f25dc0ec926d1681fed5c732d759ac8f51079708c79e680/scipy-1.15.3-cp312-cp312-macosx_12_0_arm64.whl" }, marker = "python_full_version < '3.13' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/51/4e/452984a63df9421cf8e7d25e8e6a44832cf0247a5e7b65e437cd516a0f8f/qdldl-0.1.9.post1.tar.gz", hash = "sha256:da2016d541c26cefc79bca4d8b5bebfa00f35db19704abb20efbd1c08df3b4c7", size = 76295, upload-time = "2026-02-19T16:48:36.651Z" }
@@ -2691,7 +2675,8 @@ dependencies = [
     { name = "narwhals" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.13' and platform_machine != 'arm64') or (python_full_version < '3.13' and sys_platform != 'darwin')" },
+    { name = "scipy", version = "1.15.3", source = { url = "https://files.pythonhosted.org/packages/7b/7e/f30be3d03de07f25dc0ec926d1681fed5c732d759ac8f51079708c79e680/scipy-1.15.3-cp312-cp312-macosx_12_0_arm64.whl" }, marker = "python_full_version < '3.13' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
     { name = "threadpoolctl" },
 ]
@@ -2718,7 +2703,7 @@ source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version < '3.13' and sys_platform == 'win32'",
     "python_full_version < '3.13' and sys_platform == 'emscripten'",
-    "python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "(python_full_version < '3.13' and platform_machine != 'arm64' and sys_platform == 'darwin') or (python_full_version < '3.13' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32')",
 ]
 dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" } },
@@ -2753,6 +2738,62 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/10/7e/5c12285452970be5bdbe8352c619250b97ebf7917d7a9a9e96b8a8140f17/scipy-1.15.3-cp313-cp313t-musllinux_1_2_x86_64.whl", hash = "sha256:5e721fed53187e71d0ccf382b6bf977644c533e506c4d33c3fb24de89f5c3ed5", size = 38979503, upload-time = "2025-05-08T16:08:21.513Z" },
     { url = "https://files.pythonhosted.org/packages/81/06/0a5e5349474e1cbc5757975b21bd4fad0e72ebf138c5592f191646154e06/scipy-1.15.3-cp313-cp313t-win_amd64.whl", hash = "sha256:76ad1fb5f8752eabf0fa02e4cc0336b4e8f021e2d5f061ed37d6d264db35e3ca", size = 40308097, upload-time = "2025-05-08T16:08:27.627Z" },
 ]
+
+[[package]]
+name = "scipy"
+version = "1.15.3"
+source = { url = "https://files.pythonhosted.org/packages/7b/7e/f30be3d03de07f25dc0ec926d1681fed5c732d759ac8f51079708c79e680/scipy-1.15.3-cp312-cp312-macosx_12_0_arm64.whl" }
+resolution-markers = [
+    "python_full_version < '3.13' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+]
+dependencies = [
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" } },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7b/7e/f30be3d03de07f25dc0ec926d1681fed5c732d759ac8f51079708c79e680/scipy-1.15.3-cp312-cp312-macosx_12_0_arm64.whl", hash = "sha256:185cd3d6d05ca4b44a8f1595af87f9c372bb6acf9c808e99aa3e9aa03bd98cf6" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "array-api-strict", marker = "extra == 'test'", specifier = ">=2.0,<2.1.1" },
+    { name = "asv", marker = "extra == 'test'" },
+    { name = "cython", marker = "extra == 'test'" },
+    { name = "cython-lint", marker = "extra == 'dev'", specifier = ">=0.12.2" },
+    { name = "doit", marker = "extra == 'dev'", specifier = ">=0.36.0" },
+    { name = "gmpy2", marker = "extra == 'test'" },
+    { name = "hypothesis", marker = "extra == 'test'", specifier = ">=6.30" },
+    { name = "intersphinx-registry", marker = "extra == 'doc'" },
+    { name = "jupyterlite-pyodide-kernel", marker = "extra == 'doc'" },
+    { name = "jupyterlite-sphinx", marker = "extra == 'doc'", specifier = ">=0.19.1" },
+    { name = "jupytext", marker = "extra == 'doc'" },
+    { name = "matplotlib", marker = "extra == 'doc'", specifier = ">=3.5" },
+    { name = "meson", marker = "extra == 'test'" },
+    { name = "mpmath", marker = "extra == 'test'" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = "==1.10.0" },
+    { name = "myst-nb", marker = "extra == 'doc'" },
+    { name = "ninja", marker = "sys_platform != 'emscripten' and extra == 'test'" },
+    { name = "numpy", specifier = ">=1.23.5,<2.5" },
+    { name = "numpydoc", marker = "extra == 'doc'" },
+    { name = "pooch", marker = "extra == 'doc'" },
+    { name = "pooch", marker = "extra == 'test'" },
+    { name = "pycodestyle", marker = "extra == 'dev'" },
+    { name = "pydata-sphinx-theme", marker = "extra == 'doc'", specifier = ">=0.15.2" },
+    { name = "pydevtool", marker = "extra == 'dev'" },
+    { name = "pytest", marker = "extra == 'test'" },
+    { name = "pytest-cov", marker = "extra == 'test'" },
+    { name = "pytest-timeout", marker = "extra == 'test'" },
+    { name = "pytest-xdist", marker = "extra == 'test'" },
+    { name = "rich-click", marker = "extra == 'dev'" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.0.292" },
+    { name = "scikit-umfpack", marker = "extra == 'test'" },
+    { name = "sphinx", marker = "extra == 'doc'", specifier = ">=5.0.0,<8.0.0" },
+    { name = "sphinx-copybutton", marker = "extra == 'doc'" },
+    { name = "sphinx-design", marker = "extra == 'doc'", specifier = ">=0.4.0" },
+    { name = "threadpoolctl", marker = "extra == 'test'" },
+    { name = "types-psutil", marker = "extra == 'dev'" },
+    { name = "typing-extensions", marker = "extra == 'dev'" },
+]
+provides-extras = ["test", "doc", "dev"]
 
 [[package]]
 name = "scipy"
@@ -2797,7 +2838,8 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.13' and platform_machine != 'arm64') or (python_full_version < '3.13' and sys_platform != 'darwin')" },
+    { name = "scipy", version = "1.15.3", source = { url = "https://files.pythonhosted.org/packages/7b/7e/f30be3d03de07f25dc0ec926d1681fed5c732d759ac8f51079708c79e680/scipy-1.15.3-cp312-cp312-macosx_12_0_arm64.whl" }, marker = "python_full_version < '3.13' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/9e/59/5cb7f9612a5a3ff6efd4ab2d899902a536cc5974a7edb589084c5577291c/scs-3.2.11.tar.gz", hash = "sha256:2a5455cf2093d07f84f2f848c199faed52e79cdb3a11fe250b5622b6bbac4913", size = 1691825, upload-time = "2026-01-09T17:53:54.074Z" }
@@ -2902,7 +2944,8 @@ dependencies = [
     { name = "packaging" },
     { name = "pandas" },
     { name = "patsy" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.13' and platform_machine != 'arm64') or (python_full_version < '3.13' and sys_platform != 'darwin')" },
+    { name = "scipy", version = "1.15.3", source = { url = "https://files.pythonhosted.org/packages/7b/7e/f30be3d03de07f25dc0ec926d1681fed5c732d759ac8f51079708c79e680/scipy-1.15.3-cp312-cp312-macosx_12_0_arm64.whl" }, marker = "python_full_version < '3.13' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/0d/81/e8d74b34f85285f7335d30c5e3c2d7c0346997af9f3debf9a0a9a63de184/statsmodels-0.14.6.tar.gz", hash = "sha256:4d17873d3e607d398b85126cd4ed7aad89e4e9d89fc744cdab1af3189a996c2a", size = 20689085, upload-time = "2025-12-05T23:08:39.522Z" }
@@ -3023,8 +3066,8 @@ wheels = [
 
 [[package]]
 name = "tributo"
-version = "1.0.0"
-source = { editable = "../../Tributo" }
+version = "1.1.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
     { name = "click" },
@@ -3036,6 +3079,10 @@ dependencies = [
     { name = "ray", extra = ["default", "serve", "tune"] },
     { name = "requests" },
     { name = "s3fs" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/42/0a/84e5cd87149e0c07ced0c677f2953a198c444420819a97e41f44d00bf48d/tributo-1.1.0.tar.gz", hash = "sha256:12490552d644ebd98c078ee6e011867f2f86a3962a491968274a7d2da4fa5fa0", size = 1647840, upload-time = "2026-10-13T15:02:48.45Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/92/a9/9bf12e0076bdb0a1b2cabd7d57644c2684e38af44f7d1cd0c1043afd7d5c/tributo-1.1.0-py3-none-any.whl", hash = "sha256:836d9c03766b75b9b57417d3d9af37142c0c35ca299a1a700bbe0b0c46372dae", size = 827520, upload-time = "2026-10-13T15:02:46.626Z" },
 ]
 
 [package.optional-dependencies]
@@ -3055,295 +3102,104 @@ model-export-torch = [
     { name = "torch" },
 ]
 
-[package.metadata]
-requires-dist = [
-    { name = "accelerate", marker = "extra == 'streaming'", specifier = ">=0.20.0" },
-    { name = "adbc-driver-flightsql", marker = "extra == 'doris-flight'", specifier = ">=1.6,<2" },
-    { name = "adbc-driver-manager", marker = "extra == 'doris-flight'", specifier = ">=1.6,<2" },
-    { name = "aiohttp", specifier = ">=3.13.4" },
-    { name = "bayesian-optimization", marker = "extra == 'tune'", specifier = "==1.4.3" },
-    { name = "boto3", marker = "extra == 's3'", specifier = ">=1.42.91" },
-    { name = "catboost", marker = "extra == 'test-integration'", specifier = ">=1.2,<2" },
-    { name = "causal-learn", marker = "extra == 'test-integration'", specifier = "==0.1.4.8" },
-    { name = "click", specifier = ">=8.0.0" },
-    { name = "clickhouse-connect", extras = ["arrow", "async"], marker = "extra == 'clickhouse'", specifier = ">=1.5,<1.6" },
-    { name = "confluent-kafka", marker = "extra == 'streaming-inference'", specifier = ">=2.3.0" },
-    { name = "daft", extras = ["lance", "ray"], marker = "extra == 'data-daft'", specifier = ">=0.7.23,<0.7.24" },
-    { name = "daft-clickhouse", extras = ["clickhouse"], marker = "extra == 'clickhouse'", specifier = "==1.0" },
-    { name = "daft-doris", extras = ["doris"], marker = "extra == 'mysql'", specifier = "==1.0" },
-    { name = "daft-doris", extras = ["doris-flight"], marker = "extra == 'doris-flight'", specifier = "==1.0" },
-    { name = "dowhy", marker = "extra == 'causal'", specifier = ">=0.11.0" },
-    { name = "dowhy", marker = "extra == 'test-integration'", specifier = "==0.14" },
-    { name = "econml", marker = "extra == 'causal'", specifier = ">=0.15.0" },
-    { name = "grpcio", marker = "extra == 'grpc'", specifier = ">=1.60.0" },
-    { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.25.0" },
-    { name = "kubernetes", marker = "extra == 'kuberay'", specifier = ">=35.0.0,<37.0.0" },
-    { name = "lance-ray", marker = "extra == 'data'", specifier = "==0.5.0" },
-    { name = "lightgbm", marker = "extra == 'test-integration'", specifier = ">=4.5,<5" },
-    { name = "ml-dtypes", marker = "extra == 'model-export'", specifier = ">=0.5.0" },
-    { name = "mlflow", marker = "extra == 'registry'", specifier = ">=2.18.0,<3.0.0" },
-    { name = "moto", extras = ["server"], marker = "extra == 'dev'", specifier = ">=5.1.0" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
-    { name = "numpy", marker = "extra == 'explainability'", specifier = ">=2.0.0,<3.0.0" },
-    { name = "onnx", marker = "extra == 'model-export'", specifier = ">=1.16.0" },
-    { name = "onnxmltools", marker = "extra == 'test-integration'", specifier = ">=1.13.0" },
-    { name = "onnxruntime", specifier = ">=1.20.0" },
-    { name = "onnxruntime", marker = "extra == 'identity'", specifier = ">=1.20.0" },
-    { name = "onnxruntime", marker = "extra == 'model-export'", specifier = ">=1.20.0" },
-    { name = "onnxscript", marker = "extra == 'model-export-torch'", specifier = ">=0.1.0" },
-    { name = "packaging", specifier = ">=24.0" },
-    { name = "pandas", specifier = ">=2.0.0" },
-    { name = "pandas-stubs", marker = "extra == 'dev'", specifier = "~=2.1.4" },
-    { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.6.1" },
-    { name = "psycopg", extras = ["binary"], marker = "extra == 'postgresql'", specifier = ">=3.2,<4" },
-    { name = "pyarrow", specifier = ">=15.0.0" },
-    { name = "pyarrow", marker = "extra == 'vector-index'", specifier = "==19.0.1" },
-    { name = "pydantic", specifier = ">=2.0.0" },
-    { name = "pyiceberg", marker = "extra == 'data'", specifier = ">=0.11.1,<0.12.0" },
-    { name = "pylance", marker = "extra == 'data'", specifier = "==9.0.0" },
-    { name = "pymysql", marker = "extra == 'doris-flight'", specifier = ">=1.2,<1.3" },
-    { name = "pymysql", marker = "extra == 'mysql'", specifier = ">=1.2,<1.3" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
-    { name = "pytest", marker = "extra == 'test-integration'", specifier = ">=7.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.21.0" },
-    { name = "pytest-timeout", marker = "extra == 'dev'", specifier = ">=2.1.0" },
-    { name = "ray", extras = ["default", "serve", "tune"], specifier = "==2.55.1" },
-    { name = "ray", extras = ["serve"], marker = "extra == 'streaming-inference'" },
-    { name = "ray-doris", marker = "extra == 'mysql'", specifier = "==1.0" },
-    { name = "ray-doris", extras = ["flight"], marker = "extra == 'doris-flight'", specifier = "==1.0" },
-    { name = "ray-hive", marker = "extra == 'hive-ray'", specifier = "==1.0" },
-    { name = "requests", specifier = ">=2.33.0" },
-    { name = "requests", marker = "extra == 'test-integration'", specifier = ">=2.25.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6.0,<1.0" },
-    { name = "s3fs", specifier = ">=2026.2.0" },
-    { name = "safetensors", marker = "extra == 'model-export-torch'", specifier = ">=0.4.3" },
-    { name = "scikit-learn", marker = "extra == 'test-integration'", specifier = ">=1.4,<2" },
-    { name = "shap", marker = "extra == 'explainability'", specifier = ">=0.52.0,<0.53.0" },
-    { name = "skl2onnx", marker = "extra == 'test-integration'", specifier = ">=1.17.0" },
-    { name = "sqlalchemy", marker = "extra == 'postgresql'", specifier = ">=2.0,<3" },
-    { name = "sqlglot", marker = "extra == 'postgresql'", specifier = "<30.9.0" },
-    { name = "tokenizers", marker = "extra == 'hf'", specifier = ">=0.19.0" },
-    { name = "torch", marker = "extra == 'identity'", specifier = ">=2.5.0" },
-    { name = "torch", marker = "extra == 'model-export-torch'", specifier = ">=2.5.0" },
-    { name = "torch", marker = "extra == 'streaming'", specifier = ">=2.5.0" },
-    { name = "torch-geometric", marker = "extra == 'graph'", specifier = ">=2.5.0" },
-    { name = "transformers", marker = "extra == 'hf'", specifier = ">=4.40.0" },
-    { name = "tributo", extras = ["clickhouse", "data", "data-daft", "model-export", "mysql", "postgresql", "s3"], marker = "extra == 'training'" },
-    { name = "tributo", extras = ["data", "model-export"], marker = "extra == 'identity'" },
-    { name = "tributo", extras = ["data", "s3"], marker = "extra == 'vector-index'" },
-    { name = "tributo", extras = ["hf"], marker = "extra == 'streaming'" },
-    { name = "tributo", extras = ["model-export"], marker = "extra == 'model-export-torch'" },
-    { name = "tributo", extras = ["model-export-torch"], marker = "extra == 'graph'" },
-    { name = "tributo", extras = ["model-export-torch", "hf"], marker = "extra == 'model-export-hf'" },
-    { name = "tributo", extras = ["registry", "training"], marker = "extra == 'test-integration'" },
-    { name = "tributo", extras = ["s3"], marker = "extra == 'model-export'" },
-    { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.12.20250516" },
-    { name = "xgboost", marker = "extra == 'test-integration'", specifier = ">=2.1,<4" },
-]
-provides-extras = ["dev", "data", "data-daft", "hive-ray", "vector-index", "kuberay", "postgresql", "clickhouse", "mysql", "doris-flight", "s3", "model-export", "model-export-torch", "hf", "model-export-hf", "training", "tune", "explainability", "identity", "streaming", "grpc", "registry", "graph", "causal", "streaming-inference", "test-integration"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "boto3", specifier = ">=1.42.91" },
-    { name = "clickhouse-connect", extras = ["arrow", "async"], specifier = ">=1.5,<1.6" },
-    { name = "daft", specifier = ">=0.7.23,<0.7.24" },
-    { name = "grpcio-tools", specifier = ">=1.60.0" },
-    { name = "ml-dtypes", specifier = ">=0.5.0" },
-    { name = "moto", extras = ["server"], specifier = ">=5.1.0" },
-    { name = "mypy", specifier = ">=2.3.0" },
-    { name = "pytest", specifier = ">=9.0.2" },
-    { name = "pytest-asyncio", specifier = ">=1.3.0" },
-    { name = "pytest-html", specifier = ">=4.2.0" },
-    { name = "pytest-metadata", specifier = ">=3.1.1" },
-    { name = "pytest-timeout", specifier = ">=2.4.0" },
-    { name = "redis", specifier = ">=8.0.0" },
-    { name = "skl2onnx", specifier = ">=1.17.0" },
-]
-
 [[package]]
-name = "tributo-algorithms-boosting"
+name = "tributo-algorithms"
 version = "0.1.0"
-source = { editable = "packages/boosting" }
+source = { editable = "." }
 dependencies = [
+    { name = "tributo" },
+]
+
+[package.optional-dependencies]
+all = [
+    { name = "catboost" },
+    { name = "causal-learn" },
+    { name = "dowhy" },
+    { name = "lightgbm" },
+    { name = "networkx" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
+    { name = "onnx" },
+    { name = "onnxmltools" },
+    { name = "onnxruntime" },
+    { name = "safetensors" },
+    { name = "scikit-learn" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.13' and platform_machine != 'arm64') or (python_full_version < '3.13' and sys_platform != 'darwin')" },
+    { name = "scipy", version = "1.15.3", source = { url = "https://files.pythonhosted.org/packages/7b/7e/f30be3d03de07f25dc0ec926d1681fed5c732d759ac8f51079708c79e680/scipy-1.15.3-cp312-cp312-macosx_12_0_arm64.whl" }, marker = "python_full_version < '3.13' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
+    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
+    { name = "skl2onnx" },
+    { name = "torch" },
+    { name = "torch-geometric" },
+    { name = "tributo", extra = ["model-export", "model-export-torch"] },
+    { name = "xgboost" },
+]
+boosting = [
     { name = "lightgbm" },
     { name = "onnxmltools" },
     { name = "tributo", extra = ["model-export"] },
     { name = "xgboost" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "lightgbm", specifier = ">=4.5,<5" },
-    { name = "onnxmltools", specifier = ">=1.13" },
-    { name = "tributo", extras = ["model-export"], editable = "../../Tributo" },
-    { name = "xgboost", specifier = ">=2.1,<4" },
-]
-
-[[package]]
-name = "tributo-algorithms-catboost"
-version = "0.1.0"
-source = { editable = "packages/catboost" }
-dependencies = [
+catboost = [
     { name = "catboost" },
     { name = "onnxruntime" },
-    { name = "tributo" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "catboost", specifier = ">=1.2,<2" },
-    { name = "onnxruntime", specifier = ">=1.20" },
-    { name = "tributo", editable = "../../Tributo" },
-]
-
-[[package]]
-name = "tributo-algorithms-causal-core"
-version = "0.1.0"
-source = { editable = "packages/causal-core" }
-dependencies = [
+causal-core = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
     { name = "scikit-learn" },
     { name = "skl2onnx" },
     { name = "tributo", extra = ["model-export"] },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "numpy", specifier = ">=2,<3" },
-    { name = "scikit-learn", specifier = ">=1.4,<2" },
-    { name = "skl2onnx", specifier = ">=1.17" },
-    { name = "tributo", extras = ["model-export"], editable = "../../Tributo" },
-]
-
-[[package]]
-name = "tributo-algorithms-causal-discovery"
-version = "0.1.0"
-source = { editable = "packages/causal-discovery" }
-dependencies = [
+causal-discovery = [
     { name = "causal-learn" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
     { name = "onnx" },
     { name = "onnxruntime" },
-    { name = "tributo" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "causal-learn", specifier = ">=0.1.4,<0.2" },
-    { name = "numpy", specifier = ">=2,<3" },
-    { name = "onnx", specifier = ">=1.16" },
-    { name = "onnxruntime", specifier = ">=1.20" },
-    { name = "tributo", editable = "../../Tributo" },
-]
-
-[[package]]
-name = "tributo-algorithms-causal-dowhy"
-version = "0.1.0"
-source = { editable = "packages/causal-dowhy" }
-dependencies = [
+causal-dowhy = [
     { name = "dowhy" },
     { name = "networkx" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
     { name = "onnx" },
     { name = "onnxruntime" },
-    { name = "tributo" },
-    { name = "tributo-algorithms-causal-core" },
+    { name = "scikit-learn" },
+    { name = "skl2onnx" },
+    { name = "tributo", extra = ["model-export"] },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "dowhy", specifier = ">=0.14,<0.15" },
-    { name = "networkx", specifier = ">=3.0" },
-    { name = "numpy", specifier = ">=2,<3" },
-    { name = "onnx", specifier = ">=1.16" },
-    { name = "onnxruntime", specifier = ">=1.20" },
-    { name = "tributo", editable = "../../Tributo" },
-    { name = "tributo-algorithms-causal-core", editable = "packages/causal-core" },
-]
-
-[[package]]
-name = "tributo-algorithms-causal-dr"
-version = "0.1.0"
-source = { editable = "packages/causal-dr" }
-dependencies = [
+causal-dr = [
+    { name = "lightgbm" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
-    { name = "tributo" },
-    { name = "tributo-algorithms-boosting" },
-    { name = "tributo-algorithms-causal-core" },
+    { name = "onnxmltools" },
+    { name = "scikit-learn" },
+    { name = "skl2onnx" },
+    { name = "tributo", extra = ["model-export"] },
     { name = "xgboost" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "numpy", specifier = ">=2,<3" },
-    { name = "tributo", editable = "../../Tributo" },
-    { name = "tributo-algorithms-boosting", editable = "packages/boosting" },
-    { name = "tributo-algorithms-causal-core", editable = "packages/causal-core" },
-    { name = "xgboost", specifier = ">=2.1,<4" },
-]
-
-[[package]]
-name = "tributo-algorithms-causal-xlearner"
-version = "0.1.0"
-source = { editable = "packages/causal-xlearner" }
-dependencies = [
+causal-xlearner = [
+    { name = "lightgbm" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
     { name = "onnx" },
     { name = "onnxmltools" },
     { name = "onnxruntime" },
-    { name = "tributo" },
-    { name = "tributo-algorithms-boosting" },
+    { name = "tributo", extra = ["model-export"] },
     { name = "xgboost" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "numpy", specifier = ">=2,<3" },
-    { name = "onnx", specifier = ">=1.16" },
-    { name = "onnxmltools", specifier = ">=1.13" },
-    { name = "onnxruntime", specifier = ">=1.20" },
-    { name = "tributo", editable = "../../Tributo" },
-    { name = "tributo-algorithms-boosting", editable = "packages/boosting" },
-    { name = "xgboost", specifier = ">=2.1,<4" },
-]
-
-[[package]]
-name = "tributo-algorithms-classical"
-version = "0.1.0"
-source = { editable = "packages/classical" }
-dependencies = [
+classical = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
     { name = "onnx" },
     { name = "onnxruntime" },
     { name = "scikit-learn" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.13' and platform_machine != 'arm64') or (python_full_version < '3.13' and sys_platform != 'darwin')" },
+    { name = "scipy", version = "1.15.3", source = { url = "https://files.pythonhosted.org/packages/7b/7e/f30be3d03de07f25dc0ec926d1681fed5c732d759ac8f51079708c79e680/scipy-1.15.3-cp312-cp312-macosx_12_0_arm64.whl" }, marker = "python_full_version < '3.13' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
     { name = "skl2onnx" },
-    { name = "tributo" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "numpy", specifier = ">=2,<3" },
-    { name = "onnx", specifier = ">=1.16" },
-    { name = "onnxruntime", specifier = ">=1.20" },
-    { name = "scikit-learn", specifier = ">=1.4,<2" },
-    { name = "scipy", specifier = ">=1.12,<2" },
-    { name = "skl2onnx", specifier = ">=1.17" },
-    { name = "tributo", editable = "../../Tributo" },
-]
-
-[[package]]
-name = "tributo-algorithms-graph-pyg"
-version = "0.1.0"
-source = { editable = "packages/graph-pyg" }
-dependencies = [
+graph-pyg = [
     { name = "onnx" },
     { name = "onnxruntime" },
     { name = "safetensors" },
@@ -3351,127 +3207,147 @@ dependencies = [
     { name = "torch-geometric" },
     { name = "tributo", extra = ["model-export-torch"] },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "onnx", specifier = ">=1.16" },
-    { name = "onnxruntime", specifier = ">=1.20" },
-    { name = "safetensors", specifier = ">=0.4.3" },
-    { name = "torch", specifier = ">=2.5" },
-    { name = "torch-geometric", specifier = ">=2.5" },
-    { name = "tributo", extras = ["model-export-torch"], editable = "../../Tributo" },
-]
-
-[[package]]
-name = "tributo-algorithms-multistage-torch"
-version = "0.1.0"
-source = { editable = "packages/multistage-torch" }
-dependencies = [
+multistage-torch = [
     { name = "onnx" },
     { name = "onnxruntime" },
     { name = "safetensors" },
     { name = "torch" },
     { name = "tributo", extra = ["model-export-torch"] },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "onnx", specifier = ">=1.16" },
-    { name = "onnxruntime", specifier = ">=1.20" },
-    { name = "safetensors", specifier = ">=0.4.3" },
-    { name = "torch", specifier = ">=2.5" },
-    { name = "tributo", extras = ["model-export-torch"], editable = "../../Tributo" },
-]
-
-[[package]]
-name = "tributo-algorithms-recsys-torch"
-version = "0.1.0"
-source = { editable = "packages/recsys-torch" }
-dependencies = [
+recsys-torch = [
     { name = "onnx" },
     { name = "onnxruntime" },
     { name = "torch" },
     { name = "tributo", extra = ["model-export-torch"] },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "onnx", specifier = ">=1.16" },
-    { name = "onnxruntime", specifier = ">=1.20" },
-    { name = "torch", specifier = ">=2.5" },
-    { name = "tributo", extras = ["model-export-torch"], editable = "../../Tributo" },
-]
-
-[[package]]
-name = "tributo-algorithms-representation"
-version = "0.1.0"
-source = { editable = "packages/representation" }
-dependencies = [
+representation = [
     { name = "onnx" },
     { name = "onnxruntime" },
     { name = "torch" },
-    { name = "tributo" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "onnx", specifier = ">=1.16" },
-    { name = "onnxruntime", specifier = ">=1.20" },
-    { name = "torch", specifier = ">=2.5" },
-    { name = "tributo", editable = "../../Tributo" },
-]
-
-[[package]]
-name = "tributo-algorithms-tabular-torch"
-version = "0.1.0"
-source = { editable = "packages/tabular-torch" }
-dependencies = [
+tabular-torch = [
     { name = "torch" },
     { name = "tributo", extra = ["model-export-torch"] },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "torch", specifier = ">=2.5" },
-    { name = "tributo", extras = ["model-export-torch"], editable = "../../Tributo" },
-]
-
-[[package]]
-name = "tributo-algorithms-timeseries"
-version = "0.1.0"
-source = { editable = "packages/timeseries" }
-dependencies = [
+timeseries = [
     { name = "onnx" },
     { name = "onnxruntime" },
     { name = "torch" },
-    { name = "tributo" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "onnx", specifier = ">=1.16" },
-    { name = "onnxruntime", specifier = ">=1.20" },
-    { name = "torch", specifier = ">=2.5" },
-    { name = "tributo", editable = "../../Tributo" },
-]
-
-[[package]]
-name = "tributo-algorithms-transformers-nlp"
-version = "0.1.0"
-source = { editable = "packages/transformers-nlp" }
-dependencies = [
+transformers-nlp = [
     { name = "onnx" },
     { name = "onnxruntime" },
     { name = "torch" },
-    { name = "tributo" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-timeout" },
+    { name = "ruff" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "onnx", specifier = ">=1.16" },
-    { name = "onnxruntime", specifier = ">=1.20" },
-    { name = "torch", specifier = ">=2.5" },
-    { name = "tributo", editable = "../../Tributo" },
+    { name = "catboost", marker = "extra == 'all'", specifier = ">=1.2,<2" },
+    { name = "catboost", marker = "extra == 'catboost'", specifier = ">=1.2,<2" },
+    { name = "causal-learn", marker = "extra == 'all'", specifier = ">=0.1.4,<0.2" },
+    { name = "causal-learn", marker = "extra == 'causal-discovery'", specifier = ">=0.1.4,<0.2" },
+    { name = "dowhy", marker = "extra == 'all'", specifier = ">=0.14,<0.15" },
+    { name = "dowhy", marker = "extra == 'causal-dowhy'", specifier = ">=0.14,<0.15" },
+    { name = "lightgbm", marker = "extra == 'all'", specifier = ">=4.5,<5" },
+    { name = "lightgbm", marker = "extra == 'boosting'", specifier = ">=4.5,<5" },
+    { name = "lightgbm", marker = "extra == 'causal-dr'", specifier = ">=4.5,<5" },
+    { name = "lightgbm", marker = "extra == 'causal-xlearner'", specifier = ">=4.5,<5" },
+    { name = "networkx", marker = "extra == 'all'", specifier = ">=3.0" },
+    { name = "networkx", marker = "extra == 'causal-dowhy'", specifier = ">=3.0" },
+    { name = "numpy", marker = "extra == 'all'", specifier = ">=2,<3" },
+    { name = "numpy", marker = "extra == 'causal-core'", specifier = ">=2,<3" },
+    { name = "numpy", marker = "extra == 'causal-discovery'", specifier = ">=2,<3" },
+    { name = "numpy", marker = "extra == 'causal-dowhy'", specifier = ">=2,<3" },
+    { name = "numpy", marker = "extra == 'causal-dr'", specifier = ">=2,<3" },
+    { name = "numpy", marker = "extra == 'causal-xlearner'", specifier = ">=2,<3" },
+    { name = "numpy", marker = "extra == 'classical'", specifier = ">=2,<3" },
+    { name = "onnx", marker = "extra == 'all'", specifier = ">=1.16" },
+    { name = "onnx", marker = "extra == 'causal-discovery'", specifier = ">=1.16" },
+    { name = "onnx", marker = "extra == 'causal-dowhy'", specifier = ">=1.16" },
+    { name = "onnx", marker = "extra == 'causal-xlearner'", specifier = ">=1.16" },
+    { name = "onnx", marker = "extra == 'classical'", specifier = ">=1.16" },
+    { name = "onnx", marker = "extra == 'graph-pyg'", specifier = ">=1.16" },
+    { name = "onnx", marker = "extra == 'multistage-torch'", specifier = ">=1.16" },
+    { name = "onnx", marker = "extra == 'recsys-torch'", specifier = ">=1.16" },
+    { name = "onnx", marker = "extra == 'representation'", specifier = ">=1.16" },
+    { name = "onnx", marker = "extra == 'timeseries'", specifier = ">=1.16" },
+    { name = "onnx", marker = "extra == 'transformers-nlp'", specifier = ">=1.16" },
+    { name = "onnxmltools", marker = "extra == 'all'", specifier = ">=1.13" },
+    { name = "onnxmltools", marker = "extra == 'boosting'", specifier = ">=1.13" },
+    { name = "onnxmltools", marker = "extra == 'causal-dr'", specifier = ">=1.13" },
+    { name = "onnxmltools", marker = "extra == 'causal-xlearner'", specifier = ">=1.13" },
+    { name = "onnxruntime", marker = "extra == 'all'", specifier = ">=1.20" },
+    { name = "onnxruntime", marker = "extra == 'catboost'", specifier = ">=1.20" },
+    { name = "onnxruntime", marker = "extra == 'causal-discovery'", specifier = ">=1.20" },
+    { name = "onnxruntime", marker = "extra == 'causal-dowhy'", specifier = ">=1.20" },
+    { name = "onnxruntime", marker = "extra == 'causal-xlearner'", specifier = ">=1.20" },
+    { name = "onnxruntime", marker = "extra == 'classical'", specifier = ">=1.20" },
+    { name = "onnxruntime", marker = "extra == 'graph-pyg'", specifier = ">=1.20" },
+    { name = "onnxruntime", marker = "extra == 'multistage-torch'", specifier = ">=1.20" },
+    { name = "onnxruntime", marker = "extra == 'recsys-torch'", specifier = ">=1.20" },
+    { name = "onnxruntime", marker = "extra == 'representation'", specifier = ">=1.20" },
+    { name = "onnxruntime", marker = "extra == 'timeseries'", specifier = ">=1.20" },
+    { name = "onnxruntime", marker = "extra == 'transformers-nlp'", specifier = ">=1.20" },
+    { name = "safetensors", marker = "extra == 'all'", specifier = ">=0.4.3" },
+    { name = "safetensors", marker = "extra == 'graph-pyg'", specifier = ">=0.4.3" },
+    { name = "safetensors", marker = "extra == 'multistage-torch'", specifier = ">=0.4.3" },
+    { name = "scikit-learn", marker = "extra == 'all'", specifier = ">=1.4,<2" },
+    { name = "scikit-learn", marker = "extra == 'causal-core'", specifier = ">=1.4,<2" },
+    { name = "scikit-learn", marker = "extra == 'causal-dowhy'", specifier = ">=1.4,<2" },
+    { name = "scikit-learn", marker = "extra == 'causal-dr'", specifier = ">=1.4,<2" },
+    { name = "scikit-learn", marker = "extra == 'classical'", specifier = ">=1.4,<2" },
+    { name = "scipy", marker = "python_full_version == '3.12.*' and platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'all'", url = "https://files.pythonhosted.org/packages/7b/7e/f30be3d03de07f25dc0ec926d1681fed5c732d759ac8f51079708c79e680/scipy-1.15.3-cp312-cp312-macosx_12_0_arm64.whl" },
+    { name = "scipy", marker = "python_full_version == '3.12.*' and platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'classical'", url = "https://files.pythonhosted.org/packages/7b/7e/f30be3d03de07f25dc0ec926d1681fed5c732d759ac8f51079708c79e680/scipy-1.15.3-cp312-cp312-macosx_12_0_arm64.whl" },
+    { name = "scipy", marker = "(python_full_version != '3.12.*' and extra == 'all') or (platform_machine != 'arm64' and extra == 'all') or (sys_platform != 'darwin' and extra == 'all')", specifier = ">=1.12,<2" },
+    { name = "scipy", marker = "(python_full_version != '3.12.*' and extra == 'classical') or (platform_machine != 'arm64' and extra == 'classical') or (sys_platform != 'darwin' and extra == 'classical')", specifier = ">=1.12,<2" },
+    { name = "skl2onnx", marker = "extra == 'all'", specifier = ">=1.17" },
+    { name = "skl2onnx", marker = "extra == 'causal-core'", specifier = ">=1.17" },
+    { name = "skl2onnx", marker = "extra == 'causal-dowhy'", specifier = ">=1.17" },
+    { name = "skl2onnx", marker = "extra == 'causal-dr'", specifier = ">=1.17" },
+    { name = "skl2onnx", marker = "extra == 'classical'", specifier = ">=1.17" },
+    { name = "torch", marker = "extra == 'all'", specifier = ">=2.5,<2.14" },
+    { name = "torch", marker = "extra == 'graph-pyg'", specifier = ">=2.5,<2.14" },
+    { name = "torch", marker = "extra == 'multistage-torch'", specifier = ">=2.5" },
+    { name = "torch", marker = "extra == 'recsys-torch'", specifier = ">=2.5" },
+    { name = "torch", marker = "extra == 'representation'", specifier = ">=2.5" },
+    { name = "torch", marker = "extra == 'tabular-torch'", specifier = ">=2.5" },
+    { name = "torch", marker = "extra == 'timeseries'", specifier = ">=2.5" },
+    { name = "torch", marker = "extra == 'transformers-nlp'", specifier = ">=2.5" },
+    { name = "torch-geometric", marker = "extra == 'all'", specifier = ">=2.5" },
+    { name = "torch-geometric", marker = "extra == 'graph-pyg'", specifier = ">=2.5" },
+    { name = "tributo", specifier = ">=1.1,<1.2" },
+    { name = "tributo", extras = ["model-export"], marker = "extra == 'all'", specifier = ">=1.1,<1.2" },
+    { name = "tributo", extras = ["model-export"], marker = "extra == 'boosting'", specifier = ">=1.1,<1.2" },
+    { name = "tributo", extras = ["model-export"], marker = "extra == 'causal-core'", specifier = ">=1.1,<1.2" },
+    { name = "tributo", extras = ["model-export"], marker = "extra == 'causal-dowhy'", specifier = ">=1.1,<1.2" },
+    { name = "tributo", extras = ["model-export"], marker = "extra == 'causal-dr'", specifier = ">=1.1,<1.2" },
+    { name = "tributo", extras = ["model-export"], marker = "extra == 'causal-xlearner'", specifier = ">=1.1,<1.2" },
+    { name = "tributo", extras = ["model-export-torch"], marker = "extra == 'all'", specifier = ">=1.1,<1.2" },
+    { name = "tributo", extras = ["model-export-torch"], marker = "extra == 'graph-pyg'", specifier = ">=1.1,<1.2" },
+    { name = "tributo", extras = ["model-export-torch"], marker = "extra == 'multistage-torch'", specifier = ">=1.1,<1.2" },
+    { name = "tributo", extras = ["model-export-torch"], marker = "extra == 'recsys-torch'", specifier = ">=1.1,<1.2" },
+    { name = "tributo", extras = ["model-export-torch"], marker = "extra == 'tabular-torch'", specifier = ">=1.1,<1.2" },
+    { name = "xgboost", marker = "extra == 'all'", specifier = ">=2.1,<4" },
+    { name = "xgboost", marker = "extra == 'boosting'", specifier = ">=2.1,<4" },
+    { name = "xgboost", marker = "extra == 'causal-dr'", specifier = ">=2.1,<4" },
+    { name = "xgboost", marker = "extra == 'causal-xlearner'", specifier = ">=2.1,<4" },
+]
+provides-extras = ["all", "boosting", "catboost", "causal-core", "causal-discovery", "causal-dowhy", "causal-dr", "causal-xlearner", "classical", "graph-pyg", "multistage-torch", "recsys-torch", "representation", "tabular-torch", "timeseries", "transformers-nlp"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mypy", specifier = ">=2.3.0" },
+    { name = "pytest", specifier = ">=9.0.2" },
+    { name = "pytest-timeout", specifier = ">=2.4.0" },
+    { name = "ruff", specifier = ">=0.15.0,<1.0" },
 ]
 
 [[package]]
@@ -3731,7 +3607,8 @@ dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
     { name = "nvidia-nccl-cu13", marker = "sys_platform == 'linux'" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.13' and platform_machine != 'arm64') or (python_full_version < '3.13' and sys_platform != 'darwin')" },
+    { name = "scipy", version = "1.15.3", source = { url = "https://files.pythonhosted.org/packages/7b/7e/f30be3d03de07f25dc0ec926d1681fed5c732d759ac8f51079708c79e680/scipy-1.15.3-cp312-cp312-macosx_12_0_arm64.whl" }, marker = "python_full_version < '3.13' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/38/a9/295320f741c5be4be996c73ee65a2a11852028c50daa7229adb0d61c330b/xgboost-3.4.1.tar.gz", hash = "sha256:6968a4c71efdfa859df0dfcad0d99211c95c28c4ffd6aecff46efff77d18026a", size = 1231819, upload-time = "2026-08-15T08:39:21.197Z" }

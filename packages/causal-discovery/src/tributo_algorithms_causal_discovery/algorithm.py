@@ -33,7 +33,7 @@ from tributo.exporting.models import BundleOutputConfig, ExportSource, ExportTar
 from tributo.exporting.service import BundleExportService
 from tributo.training.algorithm_spec import AlgorithmSpec, Capability, ProblemType
 
-_PACKAGE = "tributo-algorithms-causal-discovery"
+_PACKAGE = "tributo-algorithms"
 _VERSION = "0.1.0"
 _STATE_SCHEMA = (
     StateField("adjacency_votes", "int64", (None, None)),
@@ -187,10 +187,10 @@ def _query_onnx(model: CausalGraphModel) -> bytes:
             ),
         ],
     )
-    built = helper.make_model(
+    built = helper.make_model_gen_version(
         graph,
         opset_imports=[helper.make_opsetid("", 18)],
-        producer_name="tributo-algorithms-causal-discovery",
+        producer_name="tributo-algorithms",
     )
     onnx.checker.check_model(built)
     return cast(bytes, built.SerializeToString())
@@ -479,8 +479,8 @@ PC_DISCOVERY_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
             "numpy>=2,<3",
             "onnx>=1.16",
             "onnxruntime>=1.20",
-            "tributo>=1,<2",
-            f"{_PACKAGE}=={_VERSION}",
+            "tributo>=1.1,<1.2",
+            f"tributo-algorithms[causal-discovery]=={_VERSION}",
         ),
     ),
     allowed_config_keys=("alpha", "max_condition_set", "output", "vote_threshold"),
@@ -504,7 +504,7 @@ PC_DISCOVERY_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
     ),
     package_name=_PACKAGE,
     package_version=_VERSION,
-    tributo_version_spec=">=1,<2",
+    tributo_version_spec=">=1.1,<1.2",
     exporter="tributo_algorithms_causal_discovery.algorithm:export_graph",
     flavor_id="onnx-runtime-v1",
     contract_bindings=ContractBindingSet(

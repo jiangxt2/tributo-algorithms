@@ -523,7 +523,7 @@ class DistributedPretrainFinetune(RayTorchAdapter):
                     "framework": "pytorch",
                     "task_type": "binary_classification",
                     "component_stages": list(STAGES),
-                    "producer_distribution": "tributo-algorithms-multistage-torch",
+                    "producer_distribution": "tributo-algorithms",
                 },
                 source_fingerprint=_state_digest(
                     cast(Mapping[str, object], model.state_dict())

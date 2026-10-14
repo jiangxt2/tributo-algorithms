@@ -5,8 +5,8 @@ on:
   push:
     branches: [master]
 
-env:
-  TRIBUTO_CORE_REF: cdb247c801dee816fdcccdd96d1ddc6f59f7d77d
+permissions:
+  contents: read
 
 jobs:
   validate:
@@ -14,18 +14,8 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.12", "3.13"]
-    defaults:
-      run:
-        working-directory: workspace/tributo-algorithms
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: workspace/tributo-algorithms
-      - uses: actions/checkout@v4
-        with:
-          repository: jiangxt2/Tributo
-          path: Tributo
-          ref: ${{ env.TRIBUTO_CORE_REF }}
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.11.23"
@@ -34,57 +24,26 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: uv lock --check
-      - run: uv sync --locked --all-packages --group dev
+      - run: uv sync --locked --extra all --group dev
       - run: uv run ruff format --check .
       - run: uv run ruff check .
       - run: uv run mypy packages
       - run: uv run pytest tests
-      - run: uv build --all-packages --no-sources
-      - name: Verify a source-free Wheel installation
+      - run: uv build --no-sources
+      - name: Verify the source-free aggregate Wheel
         run: |
-          uv build --wheel --no-sources --out-dir "${RUNNER_TEMP}/tributo-core-dist" ../../Tributo
-          uv build --package tributo-algorithms-classical --no-sources --out-dir "${RUNNER_TEMP}/tributo-algorithm-dist"
-          uv venv "${RUNNER_TEMP}/tributo-source-free"
-          uv pip install --python "${RUNNER_TEMP}/tributo-source-free/bin/python" \
-            "${RUNNER_TEMP}"/tributo-core-dist/tributo-*.whl \
-            "${RUNNER_TEMP}"/tributo-algorithm-dist/tributo_algorithms_classical-*.whl
-          "${RUNNER_TEMP}/tributo-source-free/bin/python" \
+          uv venv "${RUNNER_TEMP}/tributo-algorithms-source-free"
+          uv pip install \
+            --python "${RUNNER_TEMP}/tributo-algorithms-source-free/bin/python" \
+            dist/tributo_algorithms-*.whl
+          "${RUNNER_TEMP}/tributo-algorithms-source-free/bin/python" \
             scripts/verify_installed_distribution.py \
-            --distribution tributo-algorithms-classical \
-            --expected-entry-points 13 \
+            --distribution tributo-algorithms \
+            --expected-entry-points 37 \
+            --expected-exporters 9 \
+            --expected-validators 1 \
+            --expected-model-flavors 3 \
+            --expected-extras all boosting catboost causal-core causal-discovery causal-dowhy \
+              causal-dr causal-xlearner classical graph-pyg multistage-torch recsys-torch \
+              representation tabular-torch timeseries transformers-nlp \
             --require-scalar-single-column-binding
-      - name: Verify source-free Wheels for XGBoost and causal algorithms
-        run: |
-          for distribution in \
-            tributo-algorithms-boosting \
-            tributo-algorithms-causal-core \
-            tributo-algorithms-causal-discovery \
-            tributo-algorithms-causal-dr \
-            tributo-algorithms-causal-xlearner \
-            tributo-algorithms-causal-dowhy; do
-            uv build --wheel --no-sources --package "$distribution" \
-              --out-dir "${RUNNER_TEMP}/tributo-algorithm-wheels"
-          done
-          uv venv "${RUNNER_TEMP}/tributo-independent-algorithms"
-          uv pip install --python "${RUNNER_TEMP}/tributo-independent-algorithms/bin/python" \
-            "${RUNNER_TEMP}"/tributo-core-dist/tributo-*.whl \
-            "${RUNNER_TEMP}"/tributo-algorithm-wheels/*.whl
-          uv pip check --python "${RUNNER_TEMP}/tributo-independent-algorithms/bin/python"
-          "${RUNNER_TEMP}/tributo-independent-algorithms/bin/python" \
-            scripts/verify_installed_distribution.py \
-            --distribution tributo-algorithms-boosting --expected-entry-points 2
-          "${RUNNER_TEMP}/tributo-independent-algorithms/bin/python" \
-            scripts/verify_installed_distribution.py \
-            --distribution tributo-algorithms-causal-core --expected-entry-points 3
-          "${RUNNER_TEMP}/tributo-independent-algorithms/bin/python" \
-            scripts/verify_installed_distribution.py \
-            --distribution tributo-algorithms-causal-discovery --expected-entry-points 1
-          "${RUNNER_TEMP}/tributo-independent-algorithms/bin/python" \
-            scripts/verify_installed_distribution.py \
-            --distribution tributo-algorithms-causal-dr --expected-entry-points 1
-          "${RUNNER_TEMP}/tributo-independent-algorithms/bin/python" \
-            scripts/verify_installed_distribution.py \
-            --distribution tributo-algorithms-causal-xlearner --expected-entry-points 1
-          "${RUNNER_TEMP}/tributo-independent-algorithms/bin/python" \
-            scripts/verify_installed_distribution.py \
-            --distribution tributo-algorithms-causal-dowhy --expected-entry-points 2

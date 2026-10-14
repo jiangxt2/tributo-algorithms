@@ -459,7 +459,7 @@ def export_result(
             "framework": "lightgbm",
             "framework_versions": {"lightgbm": lightgbm.__version__},
             "task_type": task,
-            "producer_distribution": "tributo-algorithms-boosting",
+            "producer_distribution": "tributo-algorithms",
         },
         source_fingerprint=artifact.sha256,
         checkpoint_contract=ExportCheckpointV1(

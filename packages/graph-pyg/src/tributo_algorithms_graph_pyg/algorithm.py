@@ -820,7 +820,7 @@ class DistributedGraphSAGE(RayTorchAdapter):
                     "topology_kind": "relational"
                     if self.model_kind == "rgcn"
                     else "homogeneous",
-                    "producer_distribution": "tributo-algorithms-graph-pyg",
+                    "producer_distribution": "tributo-algorithms",
                 },
                 source_fingerprint=_graph_source_fingerprint(
                     model_digest=model_digest,

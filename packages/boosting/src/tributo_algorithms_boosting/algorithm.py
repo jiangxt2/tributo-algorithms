@@ -328,7 +328,7 @@ def export_result(
                 "framework": "xgboost",
                 "framework_versions": {"xgboost": xgboost.__version__},
                 "objective": objective,
-                "producer_distribution": "tributo-algorithms-boosting",
+                "producer_distribution": "tributo-algorithms",
             },
             source_fingerprint=source_fingerprint,
             checkpoint_contract=checkpoint_contract,

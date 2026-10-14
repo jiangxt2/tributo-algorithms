@@ -1,10 +1,200 @@
-[tool.uv.workspace]
-members = ["packages/*"]
+[build-system]
+requires = ["hatchling==1.29.0"]
+build-backend = "hatchling.build"
 
-[tool.uv.sources]
-tributo = { path = "../../Tributo", editable = true }
-tributo-algorithms-boosting = { workspace = true }
-tributo-algorithms-causal-core = { workspace = true }
+[project]
+name = "tributo-algorithms"
+version = "0.1.0"
+description = "Official algorithm implementations and optional dependency extras for Tributo"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Tributo Contributors" }]
+dependencies = ["tributo>=1.1,<1.2"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+
+[project.optional-dependencies]
+"all" = [
+  "catboost>=1.2,<2",
+  "causal-learn>=0.1.4,<0.2",
+  "dowhy>=0.14,<0.15",
+  "lightgbm>=4.5,<5",
+  "networkx>=3.0",
+  "numpy>=2,<3",
+  "onnx>=1.16",
+  "onnxmltools>=1.13",
+  "onnxruntime>=1.20",
+  "safetensors>=0.4.3",
+  "scikit-learn>=1.4,<2",
+  "scipy>=1.12,<2",
+  "skl2onnx>=1.17",
+  "torch-geometric>=2.5",
+  "torch>=2.5,<2.14",
+  "tributo[model-export-torch]>=1.1,<1.2",
+  "tributo[model-export]>=1.1,<1.2",
+  "xgboost>=2.1,<4",
+]
+"boosting" = [
+  "lightgbm>=4.5,<5",
+  "onnxmltools>=1.13",
+  "tributo[model-export]>=1.1,<1.2",
+  "xgboost>=2.1,<4",
+]
+"catboost" = [
+  "catboost>=1.2,<2",
+  "onnxruntime>=1.20",
+]
+"causal-core" = [
+  "numpy>=2,<3",
+  "scikit-learn>=1.4,<2",
+  "skl2onnx>=1.17",
+  "tributo[model-export]>=1.1,<1.2",
+]
+"causal-discovery" = [
+  "causal-learn>=0.1.4,<0.2",
+  "numpy>=2,<3",
+  "onnx>=1.16",
+  "onnxruntime>=1.20",
+]
+"causal-dowhy" = [
+  "dowhy>=0.14,<0.15",
+  "networkx>=3.0",
+  "numpy>=2,<3",
+  "onnx>=1.16",
+  "onnxruntime>=1.20",
+  "scikit-learn>=1.4,<2",
+  "skl2onnx>=1.17",
+  "tributo[model-export]>=1.1,<1.2",
+]
+"causal-dr" = [
+  "lightgbm>=4.5,<5",
+  "numpy>=2,<3",
+  "onnxmltools>=1.13",
+  "scikit-learn>=1.4,<2",
+  "skl2onnx>=1.17",
+  "tributo[model-export]>=1.1,<1.2",
+  "xgboost>=2.1,<4",
+]
+"causal-xlearner" = [
+  "lightgbm>=4.5,<5",
+  "numpy>=2,<3",
+  "onnx>=1.16",
+  "onnxmltools>=1.13",
+  "onnxruntime>=1.20",
+  "tributo[model-export]>=1.1,<1.2",
+  "xgboost>=2.1,<4",
+]
+"classical" = [
+  "numpy>=2,<3",
+  "onnx>=1.16",
+  "onnxruntime>=1.20",
+  "scikit-learn>=1.4,<2",
+  "scipy>=1.12,<2",
+  "skl2onnx>=1.17",
+]
+"graph-pyg" = [
+  "onnx>=1.16",
+  "onnxruntime>=1.20",
+  "safetensors>=0.4.3",
+  "torch-geometric>=2.5",
+  "torch>=2.5,<2.14",
+  "tributo[model-export-torch]>=1.1,<1.2",
+]
+"multistage-torch" = [
+  "onnx>=1.16",
+  "onnxruntime>=1.20",
+  "safetensors>=0.4.3",
+  "torch>=2.5",
+  "tributo[model-export-torch]>=1.1,<1.2",
+]
+"recsys-torch" = [
+  "onnx>=1.16",
+  "onnxruntime>=1.20",
+  "torch>=2.5",
+  "tributo[model-export-torch]>=1.1,<1.2",
+]
+"representation" = [
+  "onnx>=1.16",
+  "onnxruntime>=1.20",
+  "torch>=2.5",
+]
+"tabular-torch" = [
+  "torch>=2.5",
+  "tributo[model-export-torch]>=1.1,<1.2",
+]
+"timeseries" = [
+  "onnx>=1.16",
+  "onnxruntime>=1.20",
+  "torch>=2.5",
+]
+"transformers-nlp" = [
+  "onnx>=1.16",
+  "onnxruntime>=1.20",
+  "torch>=2.5",
+]
+
+[project.entry-points."tributo.algorithms"]
+"catboost.parallel_ensemble" = "tributo_algorithms_catboost.descriptor:CATBOOST_DESCRIPTOR"
+"difference_in_means_ate" = "tributo_algorithms_causal_core.descriptor:ATE_DESCRIPTOR"
+"dnn" = "tributo_algorithms_tabular_torch.descriptor:DNN_DESCRIPTOR"
+"doubly_robust_ate" = "tributo_algorithms_causal_dr.descriptor:DR_DESCRIPTOR"
+"dowhy_linear_refutation" = "tributo_algorithms_causal_dowhy.descriptor:DOWHY_DESCRIPTOR"
+"extra_trees.joblib" = "tributo_algorithms_classical.descriptors:EXTRA_TREES_JOBLIB_DESCRIPTOR"
+"extra_trees.native" = "tributo_algorithms_classical.descriptors:EXTRA_TREES_NATIVE_DESCRIPTOR"
+"gcm_root_cause" = "tributo_algorithms_causal_dowhy.gcm_descriptor:GCM_DESCRIPTOR"
+"graphsage_node_classifier" = "tributo_algorithms_graph_pyg.descriptor:GRAPHSAGE_DESCRIPTOR"
+"gru_classifier" = "tributo_algorithms_timeseries.rnn_descriptor:GRU_DESCRIPTOR"
+"isolation_forest.parallel_ensemble" = "tributo_algorithms_classical.isolation_forest_descriptor:ISOLATION_FOREST_DESCRIPTOR"
+"jagged_embedding_recommender" = "tributo_algorithms_recsys_torch.jagged_descriptor:JAGGED_DESCRIPTOR"
+"kmeans.iterative" = "tributo_algorithms_classical.kmeans_descriptor:KMEANS_DESCRIPTOR"
+"kmeans_minibatch.iterative" = "tributo_algorithms_classical.kmeans_descriptor:MINIBATCH_KMEANS_DESCRIPTOR"
+"lightgbm.framework_native" = "tributo_algorithms_boosting.lightgbm_descriptor:LIGHTGBM_DESCRIPTOR"
+"linear_dml_ate" = "tributo_algorithms_causal_core.descriptor:LINEAR_DML_DESCRIPTOR"
+"linear_iv_ate" = "tributo_algorithms_causal_core.descriptor:LINEAR_IV_DESCRIPTOR"
+"linear_regression.iterative" = "tributo_algorithms_classical.descriptors:LINEAR_REGRESSION_DESCRIPTOR"
+"logistic_regression.iterative" = "tributo_algorithms_classical.descriptors:LOGISTIC_REGRESSION_DESCRIPTOR"
+"lstm_classifier" = "tributo_algorithms_timeseries.rnn_descriptor:LSTM_DESCRIPTOR"
+"multinomial_nb" = "tributo_algorithms_classical.multinomial_nb_descriptor:MULTINOMIAL_NB_DESCRIPTOR"
+"pc_stability_discovery" = "tributo_algorithms_causal_discovery.descriptor:PC_DISCOVERY_DESCRIPTOR"
+"pca.map_reduce" = "tributo_algorithms_classical.pca_descriptor:PCA_DESCRIPTOR"
+"pretrain_finetune_classifier" = "tributo_algorithms_multistage_torch.pretrain_descriptor:PRETRAIN_FINETUNE_DESCRIPTOR"
+"pu" = "tributo_algorithms_tabular_torch.descriptor:PU_DESCRIPTOR"
+"random_forest.joblib" = "tributo_algorithms_classical.descriptors:RANDOM_FOREST_JOBLIB_DESCRIPTOR"
+"random_forest.native" = "tributo_algorithms_classical.descriptors:RANDOM_FOREST_NATIVE_DESCRIPTOR"
+"rgcn_node_classifier" = "tributo_algorithms_graph_pyg.descriptor:RGCN_DESCRIPTOR"
+"sgd_classifier.iterative" = "tributo_algorithms_classical.sgd_descriptor:SGD_CLASSIFIER_DESCRIPTOR"
+"sgd_regressor.iterative" = "tributo_algorithms_classical.sgd_descriptor:SGD_REGRESSOR_DESCRIPTOR"
+"tabular_autoencoder" = "tributo_algorithms_representation.descriptor:TABULAR_AUTOENCODER_DESCRIPTOR"
+"teacher_student_distillation" = "tributo_algorithms_multistage_torch.descriptor:DISTILLATION_DESCRIPTOR"
+"temporal_conv_classifier" = "tributo_algorithms_timeseries.descriptor:TEMPORAL_CONV_DESCRIPTOR"
+"token_transformer_classifier" = "tributo_algorithms_transformers_nlp.descriptor:TOKEN_TRANSFORMER_DESCRIPTOR"
+"two_tower_recommender" = "tributo_algorithms_recsys_torch.descriptor:TWO_TOWER_DESCRIPTOR"
+"x_learner.framework_native" = "tributo_algorithms_causal_xlearner.descriptor:X_LEARNER_DESCRIPTOR"
+"xgboost.framework_native" = "tributo_algorithms_boosting.descriptor:XGBOOST_DESCRIPTOR"
+
+[project.entry-points."tributo.exporters"]
+"catboost-native-v1" = "tributo_algorithms_catboost.exporter:CatBoostNativeExporter"
+"official-causal-discovery-report-v1" = "tributo_algorithms_causal_discovery.exporter:CausalDiscoveryReportExporter"
+"official-causal-gcm-report-v1" = "tributo_algorithms_causal_dowhy.exporter:GCMReportExporter"
+"official-causal-report-v1" = "tributo_algorithms_causal_core.exporter:OfficialCausalReportExporter"
+"official-x-learner-onnx-v1" = "tributo_algorithms_causal_xlearner.exporter:XLearnerONNXExporter"
+"official-x-learner-report-v1" = "tributo_algorithms_causal_xlearner.exporter:XLearnerReportExporter"
+"official-x-learner-v1" = "tributo_algorithms_causal_xlearner.exporter:XLearnerExporter"
+"official-xgboost-onnx-v1" = "tributo_algorithms_boosting.native:OfficialXGBoostONNXExporter"
+"official-xgboost-ubj-v1" = "tributo_algorithms_boosting.native:OfficialXGBoostUBJExporter"
+
+[project.entry-points."tributo.model_flavors"]
+"catboost-native-v1" = "tributo_algorithms_catboost.flavor:CatBoostNativeFlavor"
+"official-x-learner-v1" = "tributo_algorithms_causal_xlearner.flavor:XLearnerFlavor"
+"official-xgboost-native-v1" = "tributo_algorithms_boosting.native:OfficialXGBoostNativeFlavor"
+
+[project.entry-points."tributo.validators"]
+"official-xgboost-native-runtime-v1" = "tributo_algorithms_boosting.native:OfficialXGBoostNativeValidator"
 
 [tool.ruff]
 line-length = 88
@@ -28,8 +218,38 @@ filterwarnings = ["error", "ignore::DeprecationWarning"]
 
 [dependency-groups]
 dev = [
-    "mypy>=2.3.0",
-    "pytest>=9.0.2",
-    "pytest-timeout>=2.4.0",
-    "ruff>=0.15.0,<1.0",
+  "mypy>=2.3.0",
+  "pytest>=9.0.2",
+  "pytest-timeout>=2.4.0",
+  "ruff>=0.15.0,<1.0",
 ]
+
+[tool.hatch.build.targets.wheel]
+packages = [
+  "packages/boosting/src/tributo_algorithms_boosting",
+  "packages/catboost/src/tributo_algorithms_catboost",
+  "packages/causal-core/src/tributo_algorithms_causal_core",
+  "packages/causal-discovery/src/tributo_algorithms_causal_discovery",
+  "packages/causal-dowhy/src/tributo_algorithms_causal_dowhy",
+  "packages/causal-dr/src/tributo_algorithms_causal_dr",
+  "packages/causal-xlearner/src/tributo_algorithms_causal_xlearner",
+  "packages/classical/src/tributo_algorithms_classical",
+  "packages/graph-pyg/src/tributo_algorithms_graph_pyg",
+  "packages/multistage-torch/src/tributo_algorithms_multistage_torch",
+  "packages/recsys-torch/src/tributo_algorithms_recsys_torch",
+  "packages/representation/src/tributo_algorithms_representation",
+  "packages/tabular-torch/src/tributo_algorithms_tabular_torch",
+  "packages/timeseries/src/tributo_algorithms_timeseries",
+  "packages/transformers-nlp/src/tributo_algorithms_transformers_nlp",
+]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["LICENSE", "README.md", "pyproject.toml", "packages", "scripts", "tests"]
+
+[tool.uv]
+package = true
+
+[tool.uv.sources]
+# DoWhy 0.14 caps SciPy on Python 3.12. Its macOS 12 Wheel remains compatible
+# with current arm64 macOS, where the macOS 14 Wheel fails dyld validation.
+scipy = { url = "https://files.pythonhosted.org/packages/7b/7e/f30be3d03de07f25dc0ec926d1681fed5c732d759ac8f51079708c79e680/scipy-1.15.3-cp312-cp312-macosx_12_0_arm64.whl", marker = "sys_platform == 'darwin' and platform_machine == 'arm64' and python_version == '3.12'" }

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import numpy as np
+import pytest
 from sklearn.decomposition import PCA as SklearnPCA
 from tributo.algorithms.api import (
     AlgorithmConfigurationError,
@@ -171,9 +172,13 @@ def test_kmeans_honors_max_iter_round_limit() -> None:
     assert algorithm.should_stop(state, algorithm.evaluate_round(state, update, 0), 0)
 
 
-def test_unsupervised_onnx_exports_execute_with_typed_outputs() -> None:
+def test_unsupervised_onnx_exports_execute_with_typed_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import onnx
     import onnxruntime as ort
 
+    monkeypatch.setattr(onnx, "IR_VERSION", 999)
     plan = _plan(("x0", "x1"))
     pca = PCAModel(
         components=np.asarray([[1.0, 0.0]], dtype=np.float64),

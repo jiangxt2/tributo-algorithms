@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import numpy as np
+import pandas as pd
+import pytest
 from tributo.algorithms.api import DistributionStrategy
 from tributo_algorithms_causal_dr import DR_DESCRIPTOR, DistributedDRLearner
+from tributo_algorithms_causal_dr.algorithm import _validate_treatment_batch
 from tributo_algorithms_causal_dr.contracts import DRConfigValidator
 
 
@@ -44,3 +48,33 @@ def test_dr_config_defaults_to_five_fold_cross_fitting() -> None:
     }
     normalized = DRConfigValidator().validate(value)
     assert normalized["training"] == {}
+
+
+@pytest.mark.parametrize("value", [0, 1, 0.0, 1.0, "0", "1"])
+def test_dr_treatment_validation_normalizes_binary_values(value: object) -> None:
+    result = _validate_treatment_batch(
+        pd.DataFrame({"treatment": [value]}), treatment_name="treatment"
+    )
+
+    assert result["treatment"].tolist() == [int(value)]
+    assert result["treatment"].dtype == np.dtype("int8")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [0.5, 1.5, -1, 2, np.nan, np.inf, -np.inf, None, "invalid"],
+)
+def test_dr_treatment_validation_rejects_non_binary_or_non_finite_values(
+    value: object,
+) -> None:
+    with pytest.raises(ValueError, match="treatment values"):
+        _validate_treatment_batch(
+            pd.DataFrame({"treatment": [value]}), treatment_name="treatment"
+        )
+
+
+def test_dr_treatment_validation_rejects_missing_column() -> None:
+    with pytest.raises(ValueError, match="column.*missing"):
+        _validate_treatment_batch(
+            pd.DataFrame({"outcome": [1.0]}), treatment_name="treatment"
+        )

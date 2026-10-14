@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import numpy as np
+import pytest
 from tributo.algorithms.api import (
     DistributionStrategy,
     InputBinding,
@@ -93,9 +94,13 @@ def test_discovery_coverage_contract_proves_every_shard_row() -> None:
     assert DiscoveryCoverageValidator().validate(value) == value
 
 
-def test_pc_query_onnx_is_exact_and_marks_invalid_indices() -> None:
+def test_pc_query_onnx_is_exact_and_marks_invalid_indices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import onnx
     import onnxruntime as ort
 
+    monkeypatch.setattr(onnx, "IR_VERSION", 999)
     model = CausalGraphModel(
         variables=("x0", "x1"),
         endpoint_matrix=((0, -1), (1, 0)),

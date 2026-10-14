@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import numpy as np
+from packaging.specifiers import SpecifierSet
 from sklearn.ensemble import RandomForestClassifier
 from tributo.algorithms.input.tabular import InMemoryTabularInputView
 from tributo.algorithms.spi import AlgorithmExecutionContext
@@ -68,7 +69,10 @@ def test_official_descriptors_use_public_v2_contracts() -> None:
     for descriptor in descriptors:
         assert descriptor.api_version == 2
         assert descriptor.registration.contract_bindings is not None
-        assert descriptor.package_name == "tributo-algorithms-classical"
+        assert descriptor.package_name == "tributo-algorithms"
+        assert SpecifierSet(descriptor.tributo_version_spec) == SpecifierSet(
+            ">=1.1,<1.2"
+        )
 
 
 def test_random_forest_native_is_conditional_until_parity_gate() -> None:

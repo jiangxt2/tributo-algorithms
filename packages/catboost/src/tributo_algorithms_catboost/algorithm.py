@@ -329,7 +329,7 @@ def export_result(
             "framework": "catboost",
             "framework_versions": {"catboost": catboost.__version__},
             "task_type": model.task,
-            "producer_distribution": "tributo-algorithms-catboost",
+            "producer_distribution": "tributo-algorithms",
         },
         checkpoint_contract=ExportCheckpointV1(
             trainer_type="catboost",
