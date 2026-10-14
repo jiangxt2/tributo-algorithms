@@ -67,7 +67,7 @@ DOWHY_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
         environment_id="tributo.official.causal-dowhy.v1",
         dependencies=(
             "dowhy>=0.14,<0.15",
-            "tributo>=1.1,<1.2",
+            "tributo>=1.1",
             f"tributo-algorithms[causal-dowhy]=={_VERSION}",
         ),
     ),
@@ -86,7 +86,7 @@ DOWHY_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
     ),
     package_name=_PACKAGE,
     package_version=_VERSION,
-    tributo_version_spec=">=1.1,<1.2",
+    tributo_version_spec=">=1.1",
     exporter="tributo_algorithms_causal_dowhy.algorithm:export_result",
     flavor_id="onnx-runtime-v1",
     contract_bindings=ContractBindingSet(

@@ -77,7 +77,7 @@ CATBOOST_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
         dependencies=(
             "catboost>=1.2,<2",
             "onnxruntime>=1.20",
-            "tributo>=1.1,<1.2",
+            "tributo>=1.1",
             f"tributo-algorithms[catboost]=={_VERSION}",
         ),
     ),
@@ -96,7 +96,7 @@ CATBOOST_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
     resources_per_worker=WorkerResources(num_cpus=1),
     package_name=_PACKAGE,
     package_version=_VERSION,
-    tributo_version_spec=">=1.1,<1.2",
+    tributo_version_spec=">=1.1",
     policy=ParallelEnsemblePolicy(
         max_units=256,
         max_retries=1,

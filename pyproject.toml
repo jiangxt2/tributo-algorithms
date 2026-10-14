@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.14"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Tributo Contributors" }]
-dependencies = ["tributo>=1.1,<1.2"]
+dependencies = ["tributo>=1.1"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "License :: OSI Approved :: Apache Software License",
@@ -35,14 +35,14 @@ classifiers = [
   "skl2onnx>=1.17",
   "torch-geometric>=2.5",
   "torch>=2.5,<2.14",
-  "tributo[model-export-torch]>=1.1,<1.2",
-  "tributo[model-export]>=1.1,<1.2",
+  "tributo[model-export-torch]>=1.1",
+  "tributo[model-export]>=1.1",
   "xgboost>=2.1,<4",
 ]
 "boosting" = [
   "lightgbm>=4.5,<5",
   "onnxmltools>=1.13",
-  "tributo[model-export]>=1.1,<1.2",
+  "tributo[model-export]>=1.1",
   "xgboost>=2.1,<4",
 ]
 "catboost" = [
@@ -53,7 +53,7 @@ classifiers = [
   "numpy>=2,<3",
   "scikit-learn>=1.4,<2",
   "skl2onnx>=1.17",
-  "tributo[model-export]>=1.1,<1.2",
+  "tributo[model-export]>=1.1",
 ]
 "causal-discovery" = [
   "causal-learn>=0.1.4,<0.2",
@@ -69,7 +69,7 @@ classifiers = [
   "onnxruntime>=1.20",
   "scikit-learn>=1.4,<2",
   "skl2onnx>=1.17",
-  "tributo[model-export]>=1.1,<1.2",
+  "tributo[model-export]>=1.1",
 ]
 "causal-dr" = [
   "lightgbm>=4.5,<5",
@@ -77,7 +77,7 @@ classifiers = [
   "onnxmltools>=1.13",
   "scikit-learn>=1.4,<2",
   "skl2onnx>=1.17",
-  "tributo[model-export]>=1.1,<1.2",
+  "tributo[model-export]>=1.1",
   "xgboost>=2.1,<4",
 ]
 "causal-xlearner" = [
@@ -86,7 +86,7 @@ classifiers = [
   "onnx>=1.16",
   "onnxmltools>=1.13",
   "onnxruntime>=1.20",
-  "tributo[model-export]>=1.1,<1.2",
+  "tributo[model-export]>=1.1",
   "xgboost>=2.1,<4",
 ]
 "classical" = [
@@ -103,20 +103,20 @@ classifiers = [
   "safetensors>=0.4.3",
   "torch-geometric>=2.5",
   "torch>=2.5,<2.14",
-  "tributo[model-export-torch]>=1.1,<1.2",
+  "tributo[model-export-torch]>=1.1",
 ]
 "multistage-torch" = [
   "onnx>=1.16",
   "onnxruntime>=1.20",
   "safetensors>=0.4.3",
   "torch>=2.5",
-  "tributo[model-export-torch]>=1.1,<1.2",
+  "tributo[model-export-torch]>=1.1",
 ]
 "recsys-torch" = [
   "onnx>=1.16",
   "onnxruntime>=1.20",
   "torch>=2.5",
-  "tributo[model-export-torch]>=1.1,<1.2",
+  "tributo[model-export-torch]>=1.1",
 ]
 "representation" = [
   "onnx>=1.16",
@@ -125,7 +125,7 @@ classifiers = [
 ]
 "tabular-torch" = [
   "torch>=2.5",
-  "tributo[model-export-torch]>=1.1,<1.2",
+  "tributo[model-export-torch]>=1.1",
 ]
 "timeseries" = [
   "onnx>=1.16",

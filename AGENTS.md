@@ -275,7 +275,7 @@ The repository is one uv project built with Hatchling. `packages/*` contains
 source domains, while the root `pyproject.toml` owns distribution metadata,
 entry points, optional dependency extras, and development configuration. It
 targets Python `>=3.12,<3.14` and depends on the published Tributo range
-`>=1.1,<1.2`; it does not use a local Tributo source override.
+`>=1.1`; it does not use a local Tributo source override.
 
 The graph-pyg and all extras constrain Torch to `>=2.5,<2.14` while PyG's
 module imports still call TorchScript APIs deprecated in Torch 2.14. Custom

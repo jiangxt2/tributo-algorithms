@@ -76,7 +76,7 @@ ISOLATION_FOREST_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
             "onnxruntime>=1.20",
             "scikit-learn>=1.4,<2",
             "skl2onnx>=1.17",
-            "tributo>=1.1,<1.2",
+            "tributo>=1.1",
             f"tributo-algorithms[classical]=={_VERSION}",
         ),
     ),
@@ -100,7 +100,7 @@ ISOLATION_FOREST_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
     ),
     package_name=_PACKAGE,
     package_version=_VERSION,
-    tributo_version_spec=">=1.1,<1.2",
+    tributo_version_spec=">=1.1",
     exporter="tributo_algorithms_classical.unsupervised_exporter:export_isolation_forest_model",
     flavor_id="onnx-runtime-v1",
     contract_bindings=ContractBindingSet(

@@ -80,7 +80,7 @@ def _descriptor(
                 "onnxruntime>=1.20",
                 "scikit-learn>=1.4,<2",
                 "skl2onnx>=1.17",
-                "tributo>=1.1,<1.2",
+                "tributo>=1.1",
                 f"tributo-algorithms[classical]=={_VERSION}",
             ),
         ),
@@ -104,7 +104,7 @@ def _descriptor(
         ),
         package_name=_PACKAGE,
         package_version=_VERSION,
-        tributo_version_spec=">=1.1,<1.2",
+        tributo_version_spec=">=1.1",
         exporter="tributo_algorithms_classical.exporter:export_sklearn_model",
         flavor_id="onnx-runtime-v1",
         contract_bindings=ContractBindingSet(

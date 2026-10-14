@@ -44,6 +44,15 @@ The `graph-pyg` extra currently supports Torch `>=2.5,<2.14`; `all` follows
 the same range. PyG's module import uses TorchScript APIs deprecated in Torch
 2.14. Other Torch extras retain their own dependency ranges.
 
+## Core compatibility
+
+The distribution, domain extras, and algorithm descriptors require Tributo Core
+`>=1.1` without an upper version bound. Versions below 1.1 are outside the
+declared compatibility range. An open upper bound does not certify future Core
+releases; execution support is established by the Gate for its exact Core
+version, algorithm Wheel, and runtime image. Lock those versions in consuming
+projects for reproducible deployments.
+
 ## macOS arm64 with Python 3.12
 
 DoWhy 0.14 requires SciPy `<=1.15.3` on Python 3.12. The SciPy 1.15.3 macOS 14

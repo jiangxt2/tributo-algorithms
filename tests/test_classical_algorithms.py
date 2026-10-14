@@ -70,9 +70,7 @@ def test_official_descriptors_use_public_v2_contracts() -> None:
         assert descriptor.api_version == 2
         assert descriptor.registration.contract_bindings is not None
         assert descriptor.package_name == "tributo-algorithms"
-        assert SpecifierSet(descriptor.tributo_version_spec) == SpecifierSet(
-            ">=1.1,<1.2"
-        )
+        assert SpecifierSet(descriptor.tributo_version_spec) == SpecifierSet(">=1.1")
 
 
 def test_random_forest_native_is_conditional_until_parity_gate() -> None:

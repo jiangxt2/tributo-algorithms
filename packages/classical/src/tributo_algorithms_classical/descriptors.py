@@ -21,14 +21,14 @@ from tributo.training.algorithm_spec import AlgorithmSpec, Capability, ProblemTy
 
 _PACKAGE = "tributo-algorithms"
 _VERSION = "0.1.0"
-_COMPATIBILITY = ">=1.1,<1.2"
+_COMPATIBILITY = ">=1.1"
 _DEPENDENCIES = (
     "numpy>=2,<3",
     "onnx>=1.16",
     "onnxruntime>=1.20",
     "scikit-learn>=1.4,<2",
     "skl2onnx>=1.17",
-    "tributo>=1.1,<1.2",
+    "tributo>=1.1",
     f"tributo-algorithms[classical]=={_VERSION}",
 )
 

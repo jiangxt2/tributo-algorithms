@@ -132,7 +132,7 @@ _ENVIRONMENT = EnvironmentSpec(
         "safetensors>=0.4.3",
         "torch>=2.5,<2.14",
         "torch-geometric>=2.5",
-        "tributo>=1.1,<1.2",
+        "tributo>=1.1",
         f"tributo-algorithms[graph-pyg]=={_VERSION}",
     ),
 )
@@ -186,7 +186,7 @@ def _descriptor(*, relational: bool) -> object:
         resources_per_worker=WorkerResources(num_cpus=1),
         package_name=_PACKAGE,
         package_version=_VERSION,
-        tributo_version_spec=">=1.1,<1.2",
+        tributo_version_spec=">=1.1",
         policy=_policy(relational=relational),
         code_digest=_code_digest(),
         contract_bindings=contracts,

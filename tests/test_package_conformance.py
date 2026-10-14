@@ -12,6 +12,9 @@ import importlib.metadata
 import json
 import sys
 
+from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
+
 from tributo.algorithms.conformance import validate_installed_algorithm_package
 
 heavy = {
@@ -43,8 +46,25 @@ for entry_point in importlib.metadata.entry_points(group="tributo.algorithms"):
     name = distribution.metadata["Name"] if distribution is not None else ""
     if name.lower().replace("_", "-") != "tributo-algorithms":
         continue
+    descriptor = entry_point.load()
+    core_specifier = SpecifierSet(descriptor.tributo_version_spec)
+    if core_specifier != SpecifierSet(">=1.1"):
+        raise AssertionError("official descriptor changed the Core minimum or added an upper bound")
+    if core_specifier.contains("1.0.0", prereleases=True):
+        raise AssertionError("official descriptor admitted Core below the minimum")
+    if not core_specifier.contains("1.2.0.dev0", prereleases=True):
+        raise AssertionError("official descriptor rejected the selected Core development version")
+    core_dependencies = tuple(
+        dependency
+        for value in descriptor.registration.environment.dependencies
+        if (dependency := Requirement(value)).name == "tributo"
+    )
+    if not core_dependencies or any(
+        dependency.specifier != core_specifier for dependency in core_dependencies
+    ):
+        raise AssertionError("official EnvironmentSpec disagrees with Core compatibility")
     report = validate_installed_algorithm_package(
-        entry_point.load(),
+        descriptor,
         entry_point_name=entry_point.name,
     )
     if report.implementation_loaded:
