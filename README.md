@@ -84,3 +84,26 @@ Release the aggregate distribution with a single
 `tributo-algorithms-v<semver>` tag. CI builds one Wheel and source distribution,
 publishes the same checksummed files to TestPyPI, verifies the installed
 metadata, then publishes those files to PyPI.
+
+## XGBoost Worker Gate
+
+XGBoost consumes replayable Ray Train shards in batches of at most 65,536 rows.
+The existing Core Framework Native and multi-stage entry points share this
+Worker loop; Core continues to manage execution and Bundle delivery.
+
+The Gate requires a two-node Ray 2.55.1 cluster with the same fixed Tributo Core
+1.1.0 and algorithm Wheels installed on every node, together with the
+`boosting` extra. Use a shared directory mounted at the same absolute path on
+both nodes. Submit from this repository through Ray Jobs:
+
+```bash
+ray job submit --address "$RAY_DASHBOARD_URL" --working-dir . \
+  -- python tests/jobs/xgboost_worker_gate.py --root "$GATE_SHARED_ROOT"
+```
+
+`GATE_SHARED_ROOT` must name a new directory. The job checks the Core execution
+path and `XGBoostStageRunner` with two Workers on different nodes, 131,075 input
+rows, three boosting rounds, synchronized model digests, checkpoint recovery,
+and ONNX/native Bundle artifacts. It preserves `result.json` and model outputs
+under that directory. This targeted Gate does not certify other runtime images
+or execution profiles.
