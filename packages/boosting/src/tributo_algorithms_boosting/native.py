@@ -396,7 +396,8 @@ class _XGBoostModel:
         import numpy as np
 
         matrix = self.xgboost.DMatrix(
-            np.asarray(inputs["float_input"], dtype=np.float32)
+            np.asarray(inputs["float_input"], dtype=np.float32),
+            feature_names=self.booster.feature_names,
         )
         values = np.asarray(self.booster.predict(matrix), dtype=np.float32)
         if not self.classification:
