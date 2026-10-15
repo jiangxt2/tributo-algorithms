@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import importlib.metadata
 import json
+import os
 import traceback
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +37,7 @@ from tributo.integrations.algorithm_inputs import (
     IngestionInputInvocation,
 )
 from tributo_algorithms_boosting import XGBoostStageRunner
+from tributo_algorithms_boosting.checkpointing import REPORT_KEY
 from tributo_algorithms_boosting.data_config import CompleteCoverageDataConfig
 from tributo_algorithms_boosting.native import OfficialXGBoostNativeFlavor
 
@@ -189,6 +193,408 @@ def _validation_case(
         predictions = session.run(None, {session.get_inputs()[0].name: sample})
         np.testing.assert_allclose(predictions[1][:, 1], expected, atol=1e-6)
     return {"metrics": metrics, "receipt": receipt.to_dict(), "bundle": dict(outputs)}
+
+
+@ray.remote(num_cpus=0)
+class _FaultLatch:
+    """Test-only synchronization with the controller's persisted-report event."""
+
+    def __init__(self, phase: str | None, at_round: int | None, failures: int) -> None:
+        self.phase, self.at_round, self.failures = phase, at_round, failures
+        self.events: dict[tuple[str, str, int], asyncio.Event] = {}
+        self.decisions: dict[tuple[str, str, int], bool] = {}
+        self.commits: list[dict[str, Any]] = []
+        self.starts: list[dict[str, Any]] = []
+        self.updates: list[dict[str, Any]] = []
+
+    def started(self, value: dict[str, Any]) -> None:
+        self.starts.append(value)
+
+    def updated(self, worker: str, round_number: int) -> None:
+        self.updates.append({"worker": worker, "first_new_round": round_number})
+
+    def committed(self, metrics: list[dict[str, Any]], checkpoint_path: str) -> None:
+        first = metrics[0]
+        phase = first[REPORT_KEY]["phase"]
+        completed = first["training_rounds"]
+        fail = (
+            self.failures > 0
+            and phase == self.phase
+            and (self.at_round is None or completed == self.at_round)
+        )
+        if fail:
+            self.failures -= 1
+        workers = [item[REPORT_KEY]["gate_worker_id"] for item in metrics]
+        self.commits.append(
+            {
+                "phase": phase,
+                "completed_rounds": completed,
+                "workers": workers,
+                "checkpoint_path": checkpoint_path,
+                "injected_failure": fail,
+                "resumed_from_round": first.get("resumed_from_round"),
+                "attempt_training_rounds": first.get("attempt_training_rounds"),
+            }
+        )
+        for rank, worker in enumerate(workers):
+            key = (worker, phase, completed)
+            self.decisions[key] = fail and rank == 0
+            self.events.setdefault(key, asyncio.Event()).set()
+
+    async def decision(self, worker: str, phase: str, completed: int) -> bool:
+        key = (worker, phase, completed)
+        await asyncio.wait_for(
+            self.events.setdefault(key, asyncio.Event()).wait(), timeout=90
+        )
+        return self.decisions[key]
+
+    def snapshot(self) -> dict[str, Any]:
+        return {"starts": self.starts, "updates": self.updates, "commits": self.commits}
+
+
+def _fault_worker_loop(config: dict[str, Any]) -> None:
+    """Exercise installed production code; injection exists only in this job."""
+    from ray import train
+    from ray.train import Checkpoint
+    from tributo_algorithms_boosting.algorithm import _train_loop
+
+    latch = config["gate_latch"]
+    worker = str(ray.get_runtime_context().get_worker_id())
+    rank = train.get_context().get_world_rank()
+    get_checkpoint, report, update = (
+        train.get_checkpoint,
+        train.report,
+        xgboost.Booster.update,
+    )
+    checkpoint = get_checkpoint()
+    completed = 0
+    if checkpoint is not None:
+        with checkpoint.as_directory() as directory:
+            completed = json.loads(
+                (Path(directory) / "recovery_state.json").read_text()
+            )["completed_rounds"]
+    ray.get(
+        latch.started.remote(
+            {
+                "worker": worker,
+                "rank": rank,
+                "checkpoint_rounds": completed,
+                "invocation": config["invocation"],
+            }
+        )
+    )
+    first_update = True
+
+    def observed_update(model: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal first_update
+        if first_update:
+            ray.get(latch.updated.remote(worker, completed + 1))
+            first_update = False
+        return update(model, *args, **kwargs)
+
+    def committed_report(metrics: dict[str, Any], **kwargs: Any) -> None:
+        metrics[REPORT_KEY]["gate_worker_id"] = worker
+        report(metrics, **kwargs)
+        if ray.get(
+            latch.decision.remote(
+                worker, metrics[REPORT_KEY]["phase"], metrics["training_rounds"]
+            )
+        ):
+            print(
+                f"GATE: worker {worker} exits after persisted {metrics['training_rounds']} / {metrics[REPORT_KEY]['phase']}",
+                flush=True,
+            )
+            os._exit(86)
+
+    try:
+        train.report = committed_report
+        xgboost.Booster.update = observed_update
+        if config.get("gate_foreign_checkpoint"):
+            train.get_checkpoint = lambda: Checkpoint.from_directory(
+                config["gate_foreign_checkpoint"]
+            )
+        _train_loop(config)
+    finally:
+        train.report, train.get_checkpoint, xgboost.Booster.update = (
+            report,
+            get_checkpoint,
+            update,
+        )
+
+
+def _recovery_case(
+    root: Path,
+    train_path: Path,
+    validation_path: Path,
+    params: dict[str, Any],
+    frame: pd.DataFrame,
+    *,
+    early: bool = False,
+    rounds: int = 20,
+    patience: int = 4,
+    interval: int = 10,
+    phase: str | None = None,
+    at_round: int | None = None,
+    failures: int = 1,
+    max_failures: int = 1,
+    storage: Path | None = None,
+    foreign: str | None = None,
+    expect_failure: bool = False,
+) -> dict[str, Any]:
+    import ray.train.xgboost as ray_xgboost
+    from ray.train import UserCallback
+
+    request, inputs = _request(root, train_path, validation_path, params, early=early)
+    config = dict(request.algorithm_request.algorithm_config)
+    config["training"] = {
+        "num_rounds": rounds,
+        "checkpoint_interval_rounds": interval,
+        **({"early_stopping_rounds": patience, "maximize": False} if early else {}),
+    }
+    config["ray"] = {
+        "storage_path": str(storage or root / "checkpoints"),
+        "max_failures": max_failures,
+    }
+    request = replace(
+        request,
+        algorithm_request=replace(request.algorithm_request, algorithm_config=config),
+    )
+    latch = _FaultLatch.remote(phase, at_round, failures)
+    trainer_type = ray_xgboost.XGBoostTrainer
+
+    class PersistedReport(UserCallback):
+        def after_report(
+            self, run_context: Any, metrics: list[dict[str, Any]], checkpoint: Any
+        ) -> None:
+            assert checkpoint is not None
+            ray.get(latch.committed.remote(metrics, checkpoint.path))
+
+    def trainer(**kwargs: Any) -> Any:
+        kwargs["train_loop_per_worker"] = _fault_worker_loop
+        kwargs["train_loop_config"].update(
+            gate_latch=latch, gate_foreign_checkpoint=foreign
+        )
+        kwargs["run_config"].callbacks.append(PersistedReport())
+        return trainer_type(**kwargs)
+
+    error = None
+    result = None
+    try:
+        ray_xgboost.XGBoostTrainer = trainer
+        try:
+            result = build_algorithm_dispatcher().execute(
+                request,
+                InputExecutionContext(inputs),
+                resolution_context=InputResolutionContext(values=inputs),
+            )
+        except Exception:
+            if not expect_failure:
+                raise
+            error = traceback.format_exc()
+        events = ray.get(latch.snapshot.remote())
+    finally:
+        ray_xgboost.XGBoostTrainer = trainer_type
+        ray.kill(latch, no_restart=True)
+    if expect_failure:
+        assert error is not None or (
+            result is not None and result.execution.status == "failed"
+        )
+        assert not (root / "bundle").exists()
+        return {
+            "events": events,
+            "error": error or result.execution.error_message,
+            "no_bundle": True,
+        }
+    assert result is not None and result.execution.status == "succeeded"
+    receipt = result.execution_receipt
+    assert (
+        receipt is not None and len({worker.node_id for worker in receipt.workers}) == 2
+    )
+    assert sum(worker.input_rows["train"] for worker in receipt.workers) == len(frame)
+    metrics = dict(result.execution.metrics)
+    assert sum(worker.input_rows["validation"] for worker in receipt.workers) == (
+        len(frame) if validation_path == train_path else len(frame) + 2
+    )
+    assert all(
+        worker.batch_count
+        == worker.collective_steps
+        == metrics["attempt_training_rounds"]
+        for worker in receipt.workers
+    )
+    final = events["commits"][-1]
+    assert final["phase"] == "final"
+    assert {worker.worker_id for worker in receipt.workers} == set(final["workers"])
+    outputs = result.execution.outputs
+    ref = BundleRef(
+        canonical_uri=outputs["bundle_uri"],
+        bundle_id=outputs["bundle_id"],
+        manifest_sha256=outputs["manifest_sha256"],
+    )
+    with BundleReader().open_artifact(ref, role="native") as artifact:
+        booster = xgboost.Booster(model_file=artifact.path_for("model.ubj"))
+        assert booster.num_boosted_rounds() == metrics["model_rounds"]
+        sample = frame[["f0", "f1"]].iloc[::8192].to_numpy()
+        predictions = booster.predict(xgboost.DMatrix(sample))
+    assert REPORT_KEY not in metrics
+    return {
+        "metrics": metrics,
+        "receipt": receipt.to_dict(),
+        "events": events,
+        "predictions": predictions.tolist(),
+    }
+
+
+def _recovery_contract(
+    root: Path,
+    train: Path,
+    validation: Path,
+    params: dict[str, Any],
+    frame: pd.DataFrame,
+) -> dict[str, Any]:
+    cases: dict[str, Any] = {}
+    storage = root / "shared-checkpoints"
+    cases["fixed-baseline"] = _recovery_case(
+        root / "fixed-baseline", train, validation, params, frame, storage=storage
+    )
+    cases["fixed-recovery"] = _recovery_case(
+        root / "fixed-recovery",
+        train,
+        validation,
+        params,
+        frame,
+        storage=storage,
+        phase="training",
+        at_round=10,
+    )
+    fixed = cases["fixed-recovery"]
+    assert (
+        fixed["metrics"]["resumed_from_round"]
+        == fixed["metrics"]["attempt_training_rounds"]
+        == 10
+    )
+    assert fixed["metrics"]["training_rounds"] == fixed["metrics"]["model_rounds"] == 20
+    recovered_workers = {
+        item["worker"]
+        for item in fixed["events"]["starts"]
+        if item["checkpoint_rounds"] == 10
+    }
+    assert len(recovered_workers) == 2
+    assert {
+        item["first_new_round"]
+        for item in fixed["events"]["updates"]
+        if item["worker"] in recovered_workers
+    } == {11}
+    np.testing.assert_allclose(
+        fixed["predictions"], cases["fixed-baseline"]["predictions"], atol=1e-6
+    )
+    cases["new-invocation"] = _recovery_case(
+        root / "new-invocation", train, validation, params, frame, storage=storage
+    )
+    assert all(
+        item["checkpoint_rounds"] == 0
+        for item in cases["new-invocation"]["events"]["starts"]
+    )
+    assert {
+        item["invocation"] for item in cases["new-invocation"]["events"]["starts"]
+    }.isdisjoint({item["invocation"] for item in fixed["events"]["starts"]})
+    for name, validation_path, patience, rounds, interval, at_round in (
+        ("patience", validation, 4, 20, 3, 3),
+        ("cap", train, 20, 6, 2, 2),
+    ):
+        baseline = _recovery_case(
+            root / f"{name}-baseline",
+            train,
+            validation_path,
+            params,
+            frame,
+            early=True,
+            patience=patience,
+            rounds=rounds,
+            interval=interval,
+        )
+        recovered = _recovery_case(
+            root / f"{name}-recovery",
+            train,
+            validation_path,
+            params,
+            frame,
+            early=True,
+            patience=patience,
+            rounds=rounds,
+            interval=interval,
+            phase="training",
+            at_round=at_round,
+        )
+        for field in ("training_rounds", "model_rounds", "best_iteration"):
+            assert recovered["metrics"][field] == baseline["metrics"][field]
+        assert (
+            abs(recovered["metrics"]["best_score"] - baseline["metrics"]["best_score"])
+            < 1e-6
+        )
+        np.testing.assert_allclose(
+            recovered["predictions"], baseline["predictions"], atol=1e-6
+        )
+        if name == "patience":
+            assert recovered["metrics"]["training_rounds"] == 5
+            assert recovered["metrics"]["best_iteration"] == 0
+            assert recovered["metrics"]["attempt_training_rounds"] == 2
+        else:
+            assert recovered["metrics"]["training_rounds"] == rounds
+            assert recovered["metrics"]["best_iteration"] >= at_round
+        cases[f"{name}-baseline"], cases[f"{name}-recovery"] = baseline, recovered
+    for early in (False, True):
+        terminal = _recovery_case(
+            root / f"terminal-{early}",
+            train,
+            validation,
+            params,
+            frame,
+            early=early,
+            interval=3,
+            phase="final",
+        )
+        assert terminal["metrics"]["attempt_training_rounds"] == 0
+        assert (
+            terminal["metrics"]["resumed_from_round"]
+            == terminal["metrics"]["training_rounds"]
+        )
+        final_workers = set(terminal["events"]["commits"][-1]["workers"])
+        assert not any(
+            item["worker"] in final_workers for item in terminal["events"]["updates"]
+        )
+        assert (
+            sum(item["phase"] == "final" for item in terminal["events"]["commits"]) == 2
+        )
+        cases[f"terminal-{early}"] = terminal
+    cases["budget-exhausted"] = _recovery_case(
+        root / "budget-exhausted",
+        train,
+        validation,
+        params,
+        frame,
+        phase="training",
+        failures=2,
+        expect_failure=True,
+    )
+    assert (
+        sum(
+            item["injected_failure"]
+            for item in cases["budget-exhausted"]["events"]["commits"]
+        )
+        == 2
+    )
+    cases["foreign-checkpoint"] = _recovery_case(
+        root / "foreign-checkpoint",
+        train,
+        validation,
+        params,
+        frame,
+        max_failures=0,
+        foreign=fixed["events"]["commits"][-1]["checkpoint_path"],
+        expect_failure=True,
+    )
+    assert "checkpoint is invalid" in str(cases["foreign-checkpoint"]["error"])
+    return cases
 
 
 def main(root: Path) -> None:
@@ -353,6 +759,9 @@ def main(root: Path) -> None:
             assert failed.execution.status == "failed"
             assert "empty" in str(failed.execution.error_message).lower()
         assert not (failed_root / "bundle").exists()
+        recovery_cases = _recovery_contract(
+            root / "recovery", data_path, validation_path, params, frame
+        )
         summary = {
             "versions": {
                 name: importlib.metadata.version(name)
@@ -367,6 +776,7 @@ def main(root: Path) -> None:
             "identity_contract": identities,
             "validation_cases": validation_cases,
             "empty_validation_rejected": True,
+            "recovery_cases": recovery_cases,
         }
         (root / "result.json").write_text(
             json.dumps(summary, indent=2), encoding="utf-8"

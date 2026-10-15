@@ -9,7 +9,9 @@ import math
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
+from traceback import clear_frames
 from typing import Any, cast
+from uuid import uuid4
 
 from tributo.algorithms.api import (
     AlgorithmConfigurationError,
@@ -21,6 +23,7 @@ from tributo.algorithms.spi import FrameworkNativeAlgorithm
 
 from tributo_algorithms_boosting.contracts import (
     XGBoostInputValidator,
+    _validate_recovery_options,
     _validate_training_metadata,
     _validate_training_options,
 )
@@ -32,6 +35,7 @@ _XGBOOST_BATCH_ROWS = 65_536
 class _EvidenceCollector:
     def __init__(self) -> None:
         self.records: dict[int, dict[str, object]] = {}
+        self.final: dict[str, Any] | None = None
 
     def record(self, value: dict[str, object]) -> None:
         rank = value.get("rank")
@@ -44,6 +48,12 @@ class _EvidenceCollector:
     def snapshot(self) -> list[dict[str, object]]:
         return [self.records[rank] for rank in sorted(self.records)]
 
+    def replace_final(self, value: dict[str, Any]) -> None:
+        self.final = value
+
+    def final_snapshot(self) -> dict[str, Any] | None:
+        return self.final
+
 
 def _train_loop(config: dict[str, Any]) -> None:
     import ray
@@ -51,16 +61,25 @@ def _train_loop(config: dict[str, Any]) -> None:
     from ray import train
     from ray.train import Checkpoint
 
+    from tributo_algorithms_boosting.checkpointing import (
+        REPORT_KEY,
+        read_checkpoint,
+        recovery_identity,
+        training_callback,
+        write_checkpoint,
+    )
+
     feature_names = list(config["feature_names"])
     label_name = str(config["label_name"])
     training = {"num_rounds": config["num_boost_round"]}
-    for key in ("early_stopping_rounds", "maximize"):
+    for key in ("early_stopping_rounds", "maximize", "checkpoint_interval_rounds"):
         if key in config:
             training[key] = config[key]
     try:
         rounds, patience, maximize = _validate_training_options(
             training, config["params"]
         )
+        interval, _ = _validate_recovery_options(training, {}, config["params"])
     except ValueError as exc:
         raise AlgorithmExecutionError(str(exc)) from exc
     roles = tuple(config.get("input_roles", ("train",)))
@@ -116,12 +135,48 @@ def _train_loop(config: dict[str, Any]) -> None:
     rank = context.get_world_rank()
     world_size = context.get_world_size()
     evidence_actor = config["evidence_actor"]
+    identity = recovery_identity(config, world_size) if interval else None
+    restored = None
+    restore_model = None
+    if interval:
+        checkpoint = train.get_checkpoint()
+        if checkpoint is not None:
+            with checkpoint.as_directory() as directory:
+                restore_model, restored = read_checkpoint(
+                    Path(directory),
+                    identity=cast(Mapping[str, Any], identity),
+                    rounds=rounds,
+                    patience=patience,
+                    maximize=maximize,
+                )
+
+    def periodic_report(model: Any, state: Any) -> None:
+        metrics = {
+            "training_rounds": state.completed,
+            **state.last_metrics,
+            REPORT_KEY: {"phase": "training", "invocation": config["invocation"]},
+        }
+        if rank == 0:
+            with tempfile.TemporaryDirectory(
+                prefix="tributo-xgboost-periodic-"
+            ) as directory:
+                root = Path(directory)
+                write_checkpoint(
+                    root,
+                    full_model=bytes(model.save_raw(raw_format="ubj")),
+                    state=state,
+                    identity=cast(Mapping[str, Any], identity),
+                )
+                train.report(metrics, checkpoint=Checkpoint.from_directory(root))
+        else:
+            train.report(metrics)
 
     with tempfile.TemporaryDirectory(prefix="tributo-xgboost-pages-") as cache_root:
         iterators: dict[str, Any] = {}
         matrices: dict[str, Any] = {}
         evals: list[Any] = []
         history: dict[str, Any] = {}
+        state = None
         try:
             for role in roles:
                 iterators[role] = ShardDataIter(role, str(Path(cache_root) / role))
@@ -132,7 +187,17 @@ def _train_loop(config: dict[str, Any]) -> None:
             if any(rows < 1 for rows in input_rows.values()):
                 raise AlgorithmExecutionError("XGBoost Worker shard is empty")
             callbacks = []
-            if patience is not None:
+            if interval:
+                state = training_callback(
+                    dtrain=matrices["train"],
+                    patience=patience,
+                    maximize=maximize,
+                    interval=interval,
+                    restored=restored,
+                    report=periodic_report,
+                )
+                callbacks.append(state)
+            elif patience is not None:
                 callbacks.append(
                     xgboost.callback.EarlyStopping(
                         rounds=patience,
@@ -145,7 +210,16 @@ def _train_loop(config: dict[str, Any]) -> None:
             booster = xgboost.train(
                 dict(config["params"]),
                 matrices["train"],
-                num_boost_round=rounds,
+                num_boost_round=(
+                    0
+                    if restored and restored["stopped"]
+                    else rounds - (restored["completed_rounds"] if restored else 0)
+                ),
+                **(
+                    {"xgb_model": bytearray(restore_model)}
+                    if restore_model is not None
+                    else {}
+                ),
                 evals=evals,
                 evals_result=history,
                 callbacks=callbacks,
@@ -153,11 +227,15 @@ def _train_loop(config: dict[str, Any]) -> None:
             )
             metadata: dict[str, Any] = {
                 "schema_version": 1,
-                "training_rounds": rounds,
+                "training_rounds": state.completed if state is not None else rounds,
                 "model_rounds": int(booster.num_boosted_rounds()),
             }
             if patience is not None:
-                validation_history = history.get("validation", {})
+                validation_history = (
+                    {state.metric: state.scores}
+                    if state is not None
+                    else history.get("validation", {})
+                )
                 if len(validation_history) != 1:
                     raise AlgorithmExecutionError(
                         "XGBoost selection metric is ambiguous"
@@ -182,11 +260,18 @@ def _train_loop(config: dict[str, Any]) -> None:
                 raise AlgorithmExecutionError(
                     "XGBoost exceeded the requested training rounds"
                 )
+        except BaseException as exc:
+            # Completed native frames retain DMatrix arguments on report failure.
+            # Release those locals before removing their cache pages.
+            clear_frames(exc.__traceback__)
+            raise
         finally:
             # DMatrix owns external-memory pages. Release it before its cache directory.
             evals.clear()
             matrices.clear()
             iterators.clear()
+            if state is not None:
+                state.matrix = None
             gc.collect()
 
     raw = bytes(booster.save_raw(raw_format="ubj"))
@@ -203,8 +288,12 @@ def _train_loop(config: dict[str, Any]) -> None:
         ).hexdigest(),
         "rows_processed": input_rows["train"],
         "input_rows": input_rows,
-        "batch_count": metadata["training_rounds"],
-        "collective_steps": metadata["training_rounds"],
+        "batch_count": state.completed - state.start
+        if state is not None
+        else metadata["training_rounds"],
+        "collective_steps": state.completed - state.start
+        if state is not None
+        else metadata["training_rounds"],
         "model_state_digest": digest,
         "resources": {
             "num_cpus": float(assigned.get("CPU", 0.0)),
@@ -220,6 +309,17 @@ def _train_loop(config: dict[str, Any]) -> None:
         "model_state_digest": digest,
         **{key: value for key, value in metadata.items() if key != "schema_version"},
     }
+    if state is not None:
+        metrics.update(
+            state.last_metrics,
+            resumed_from_round=state.start,
+            attempt_training_rounds=state.completed - state.start,
+        )
+        metrics[REPORT_KEY] = {
+            "phase": "final",
+            "invocation": config["invocation"],
+            "worker": evidence,
+        }
     for role, values in history.items():
         for metric, scores in values.items():
             if not scores or not math.isfinite(scores[-1]):
@@ -227,7 +327,8 @@ def _train_loop(config: dict[str, Any]) -> None:
                     "XGBoost evaluation scores must be finite"
                 )
             metrics[f"{role}-{metric}"] = scores[-1]
-    ray.get(evidence_actor.record.remote(evidence))
+    if not interval:
+        ray.get(evidence_actor.record.remote(evidence))
     if rank == 0:
         with tempfile.TemporaryDirectory(prefix="tributo-xgboost-") as directory:
             root = Path(directory)
@@ -238,6 +339,15 @@ def _train_loop(config: dict[str, Any]) -> None:
             (root / "training_metadata.json").write_text(
                 json.dumps(metadata, sort_keys=True, allow_nan=False), encoding="utf-8"
             )
+            if state is not None:
+                write_checkpoint(
+                    root,
+                    full_model=state.full_model,
+                    state=state,
+                    identity=cast(Mapping[str, Any], identity),
+                    selected=raw,
+                    metadata=metadata,
+                )
             train.report(metrics, checkpoint=Checkpoint.from_directory(root))
     else:
         train.report(metrics)
@@ -249,6 +359,7 @@ class DistributedXGBoost(FrameworkNativeAlgorithm):
     def __init__(self, plan: ResolvedAlgorithmPlan) -> None:
         self.plan = plan
         self.collector: Any | None = None
+        self.invocation: str | None = None
         if plan.runtime.resume_from is not None:
             raise AlgorithmConfigurationError(
                 "official XGBoost resume requires a separate failure-recovery gate"
@@ -264,6 +375,18 @@ class DistributedXGBoost(FrameworkNativeAlgorithm):
             ) from exc
         if not xgboost.__version__ or XGBoostTrainer is None:
             raise AlgorithmConfigurationError("XGBoost environment is invalid")
+        training = self.plan.algorithm_config.get("training", {})
+        if training.get("checkpoint_interval_rounds", 0):
+            try:
+                from ray.train import UserCallback
+            except ImportError as exc:
+                raise AlgorithmConfigurationError(
+                    "XGBoost recovery requires Ray Train V2"
+                ) from exc
+            if UserCallback is None:
+                raise AlgorithmConfigurationError(
+                    "XGBoost recovery requires Ray Train V2"
+                )
 
     def bind_datasets(self, datasets: Mapping[str, object]) -> Mapping[str, object]:
         try:
@@ -345,6 +468,8 @@ class DistributedXGBoost(FrameworkNativeAlgorithm):
         ray_config = cast(Mapping[str, Any], config.get("ray", {}))
         binding = self.plan.primary_input_binding
         rounds, patience, maximize = _validate_training_options(training, model)
+        interval, failures = _validate_recovery_options(training, ray_config, model)
+        self.invocation = uuid4().hex
         collector_type = ray.remote(_EvidenceCollector).options(num_cpus=0)
         self.collector = collector_type.remote()
         return XGBoostTrainer(
@@ -355,6 +480,15 @@ class DistributedXGBoost(FrameworkNativeAlgorithm):
                 "params": model,
                 "num_boost_round": rounds,
                 "input_roles": list(datasets),
+                **(
+                    {
+                        "checkpoint_interval_rounds": interval,
+                        "invocation": self.invocation,
+                        "plan_id": self.plan.plan_id,
+                    }
+                    if interval
+                    else {}
+                ),
                 **(
                     {"early_stopping_rounds": patience, "maximize": maximize}
                     if patience is not None
@@ -376,20 +510,62 @@ class DistributedXGBoost(FrameworkNativeAlgorithm):
             datasets=cast(dict[str, Any], dict(datasets)),
             dataset_config=CompleteCoverageDataConfig(datasets_to_split=list(datasets)),
             run_config=RunConfig(
-                name="tributo-official-xgboost",
+                name=f"tributo-official-xgboost-{self.invocation}",
                 storage_path=str(ray_config["storage_path"]),
+                **self._recovery_run_options(interval, failures),
             ),
         )
+
+    def _recovery_run_options(self, interval: int, failures: int) -> dict[str, Any]:
+        if not interval:
+            return {}
+        from ray.train import CheckpointConfig, FailureConfig
+
+        from tributo_algorithms_boosting.checkpointing import evidence_callback
+
+        # ray.train conditionally exports V1 or V2 types. The environment gate
+        # requires V2 for this path; these options belong to its public API.
+        failure_options: dict[str, Any] = {
+            "max_failures": failures,
+            "controller_failure_limit": 0,
+            "max_preemption_failures": 0,
+        }
+        return {
+            "failure_config": FailureConfig(**failure_options),
+            "checkpoint_config": CheckpointConfig(num_to_keep=1),
+            "callbacks": [
+                evidence_callback(
+                    self.collector,
+                    cast(str, self.invocation),
+                    self.plan.runtime.worker_count,
+                )
+            ],
+        }
 
     def collect_evidence(self, result: object) -> Mapping[str, Any]:
         import ray
 
-        del result
         if self.collector is None:
             raise AlgorithmExecutionError("XGBoost evidence collector is missing")
-        workers = ray.get(self.collector.snapshot.remote())
-        ray.kill(self.collector, no_restart=True)
-        self.collector = None
+        interval = self.plan.algorithm_config.get("training", {}).get(
+            "checkpoint_interval_rounds", 0
+        )
+        try:
+            if interval:
+                from tributo_algorithms_boosting.checkpointing import check_final_result
+
+                group = ray.get(self.collector.final_snapshot.remote())
+                if group is None:
+                    raise AlgorithmExecutionError(
+                        "XGBoost final Worker evidence is missing"
+                    )
+                check_final_result(result, group, cast(str, self.invocation))
+                workers = group["workers"]
+            else:
+                workers = ray.get(self.collector.snapshot.remote())
+        finally:
+            ray.kill(self.collector, no_restart=True)
+            self.collector = None
         if len(workers) != self.plan.runtime.worker_count:
             raise AlgorithmExecutionError("XGBoost did not report every Worker")
         digests = {str(item.get("model_state_digest")) for item in workers}
@@ -460,8 +636,16 @@ def export_result(
                     "XGBoost evaluation scores must be finite"
                 )
             metrics[key] = float(value)
-        elif key == "training_rounds":
-            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        elif key in {
+            "training_rounds",
+            "resumed_from_round",
+            "attempt_training_rounds",
+        }:
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < (1 if key == "training_rounds" else 0)
+            ):
                 raise AlgorithmExecutionError(
                     "XGBoost reported training rounds are invalid"
                 )
@@ -471,6 +655,49 @@ def export_result(
         raise AlgorithmConfigurationError("XGBoost output.bundle_uri is required")
     with cast(Any, checkpoint).as_directory() as directory:
         root = Path(directory)
+        training = cast(Mapping[str, Any], plan.algorithm_config.get("training", {}))
+        if training.get("checkpoint_interval_rounds", 0):
+            from tributo_algorithms_boosting.checkpointing import (
+                REPORT_KEY,
+                read_checkpoint,
+                recovery_identity,
+            )
+
+            internal = raw_metrics.get(REPORT_KEY, {})
+            if not isinstance(internal, Mapping) or internal.get("phase") != "final":
+                raise AlgorithmExecutionError(
+                    "XGBoost export requires a final checkpoint"
+                )
+            identity = recovery_identity(
+                {
+                    "invocation": internal.get("invocation"),
+                    "plan_id": plan.plan_id,
+                    "feature_names": plan.primary_input_binding.feature_names,
+                    "label_name": plan.primary_input_binding.label_name,
+                    "input_roles": [
+                        binding.name for binding in plan.input_bindings.bindings
+                    ],
+                },
+                plan.runtime.worker_count,
+            )
+            _, recovery = read_checkpoint(
+                root,
+                identity=identity,
+                rounds=training.get("num_rounds", 10),
+                patience=training.get("early_stopping_rounds"),
+                maximize=training.get("maximize"),
+            )
+            if (
+                recovery["phase"] != "final"
+                or recovery["selected_sha256"] != raw_metrics.get("model_state_digest")
+                or recovery["completed_rounds"] != metrics.get("training_rounds")
+                or metrics.get("resumed_from_round", -1)
+                + metrics.get("attempt_training_rounds", -1)
+                != recovery["completed_rounds"]
+            ):
+                raise AlgorithmExecutionError(
+                    "XGBoost final checkpoint and result diverged"
+                )
         booster = xgboost.Booster()
         booster.load_model(root / "model.ubj")
         metadata_path = root / "training_metadata.json"

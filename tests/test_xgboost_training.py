@@ -17,6 +17,7 @@ import xgboost
 from ray import train
 from tributo.algorithms.api import AlgorithmExecutionError
 from tributo_algorithms_boosting import algorithm, stages
+from tributo_algorithms_boosting.checkpointing import REPORT_KEY
 
 
 class _Shard:
@@ -337,3 +338,165 @@ def test_worker_rejects_missing_or_empty_validation_without_success(
         algorithm._train_loop(config)
     assert not evidence and not reports
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("early", [False, True])
+def test_worker_resumes_saved_progress_and_native_patience(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, early: bool
+) -> None:
+    import shutil
+
+    from ray.train import Checkpoint
+
+    frame = _frame()
+    validation_frame = frame.copy()
+    validation_frame["label"] = 1 - validation_frame["label"]
+    _, evidence, _ = _worker(
+        monkeypatch, tmp_path, frame, validation=_Shard(validation_frame)
+    )
+    config = _config(evidence)
+    config.update(
+        input_roles=["train", "validation"],
+        num_boost_round=20,
+        checkpoint_interval_rounds=3 if early else 10,
+        invocation="same-fit",
+        plan_id="frozen-plan",
+    )
+    config["params"].update(min_child_weight=0, max_depth=1, eval_metric="logloss")
+    if early:
+        config.update(early_stopping_rounds=4, maximize=False)
+    monkeypatch.setattr(train, "get_checkpoint", lambda: None)
+    saved = tmp_path / "committed"
+
+    class Failure(RuntimeError):
+        pass
+
+    def fail_after_commit(metrics: Any, *, checkpoint: Any = None) -> None:
+        assert metrics[REPORT_KEY]["phase"] == "training"
+        with checkpoint.as_directory() as directory:
+            shutil.copytree(directory, saved)
+        raise Failure("committed Worker failure")
+
+    monkeypatch.setattr(train, "report", fail_after_commit)
+    with pytest.raises(Failure):
+        algorithm._train_loop(config)
+    assert not evidence
+    reports: list[dict[str, Any]] = []
+
+    def capture(metrics: Any, *, checkpoint: Any = None) -> None:
+        if metrics[REPORT_KEY]["phase"] == "final":
+            with checkpoint.as_directory() as directory:
+                raw = (Path(directory) / "model.ubj").read_bytes()
+                full = (Path(directory) / "training.ubj").read_bytes()
+            reports.append({"metrics": metrics, "raw": raw, "full": full})
+
+    monkeypatch.setattr(
+        train, "get_checkpoint", lambda: Checkpoint.from_directory(saved)
+    )
+    monkeypatch.setattr(train, "report", capture)
+    algorithm._train_loop(config)
+    assert len(reports) == 1 and not evidence
+    metrics = reports[0]["metrics"]
+    start = 3 if early else 10
+    assert metrics["resumed_from_round"] == start
+    expected_rounds = 5 if early else 20
+    assert metrics["training_rounds"] == expected_rounds
+    assert metrics["attempt_training_rounds"] == expected_rounds - start
+    worker = metrics[REPORT_KEY]["worker"]
+    assert worker["input_rows"] == {"train": 7, "validation": 7}
+    assert (
+        worker["batch_count"] == worker["collective_steps"] == expected_rounds - start
+    )
+    full = xgboost.Booster(model_file=bytearray(reports[0]["full"]))
+    assert full.num_boosted_rounds() == expected_rounds
+    matrix = xgboost.DMatrix(frame[["b", "a"]].to_numpy(), label=frame["label"])
+    validation = xgboost.DMatrix(
+        validation_frame[["b", "a"]].to_numpy(), label=validation_frame["label"]
+    )
+    native = xgboost.train(
+        config["params"],
+        matrix,
+        num_boost_round=20,
+        evals=[(matrix, "train"), (validation, "validation")],
+        callbacks=[
+            xgboost.callback.EarlyStopping(
+                rounds=4, data_name="validation", maximize=False, save_best=True
+            )
+        ]
+        if early
+        else [],
+        verbose_eval=False,
+    )
+    restored = xgboost.Booster(model_file=bytearray(reports[0]["raw"]))
+    assert restored.num_boosted_rounds() == native.num_boosted_rounds()
+    np.testing.assert_allclose(restored.predict(matrix), native.predict(matrix))
+    if early:
+        assert metrics["best_iteration"] == native.best_iteration == 0
+        assert metrics["best_score"] == native.best_score
+
+
+@pytest.mark.parametrize("early", [False, True])
+@pytest.mark.parametrize("phase", ["training", "final"])
+def test_worker_restores_final_checkpoint_without_training_again(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, early: bool, phase: str
+) -> None:
+    import shutil
+
+    from ray.train import Checkpoint
+
+    frame = _frame()
+    validation = frame.copy()
+    validation["label"] = 1 - validation["label"]
+    _, evidence, _ = _worker(
+        monkeypatch, tmp_path, frame, validation=_Shard(validation)
+    )
+    config = _config(evidence)
+    config.update(
+        input_roles=["train", "validation"],
+        checkpoint_interval_rounds=3,
+        invocation="same-fit",
+        plan_id="frozen-plan",
+        num_boost_round=20 if early else 3,
+    )
+    config["params"].update(min_child_weight=0, max_depth=1, eval_metric="logloss")
+    if early:
+        config.update(early_stopping_rounds=2, maximize=False)
+    monkeypatch.setattr(train, "get_checkpoint", lambda: None)
+    saved = tmp_path / "final"
+    initial: list[dict[str, Any]] = []
+
+    def capture_final(metrics: Any, *, checkpoint: Any = None) -> None:
+        if metrics[REPORT_KEY]["phase"] == phase:
+            with checkpoint.as_directory() as directory:
+                shutil.copytree(directory, saved)
+        if metrics[REPORT_KEY]["phase"] == "final":
+            initial.append(metrics)
+
+    monkeypatch.setattr(train, "report", capture_final)
+    algorithm._train_loop(config)
+    actual: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        train, "get_checkpoint", lambda: Checkpoint.from_directory(saved)
+    )
+    monkeypatch.setattr(
+        train, "report", lambda metrics, **kwargs: actual.append(metrics)
+    )
+    native_train = xgboost.train
+    calls: list[int] = []
+
+    def train_zero(*args: Any, **kwargs: Any) -> Any:
+        calls.append(kwargs["num_boost_round"])
+        return native_train(*args, **kwargs)
+
+    monkeypatch.setattr(xgboost, "train", train_zero)
+    algorithm._train_loop(config)
+    assert calls == [0] and len(actual) == 1 and not evidence
+    assert actual[0]["attempt_training_rounds"] == 0
+    assert actual[0]["resumed_from_round"] == initial[0]["training_rounds"]
+    for key in (
+        "model_state_digest",
+        "training_rounds",
+        "model_rounds",
+        "validation-logloss",
+    ):
+        assert actual[0][key] == initial[0][key]
