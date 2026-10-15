@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from dataclasses import dataclass
 from typing import Any, ClassVar, Mapping, cast
@@ -25,6 +26,33 @@ from tributo.exporting.models import (
     ValidatorBinding,
 )
 from tributo.exporting.runtime import SECURITY_MODE_SAFE, BundleModel
+
+from tributo_algorithms_boosting.contracts import _validate_training_metadata
+
+
+def _check_training_metadata(booster: Any, value: object) -> dict[str, Any]:
+    metadata = _validate_training_metadata(value)
+    if booster.num_boosted_rounds() != metadata["model_rounds"]:
+        raise ValueError("XGBoost training metadata model rounds drifted")
+    if "best_iteration" in metadata and (
+        booster.best_iteration != metadata["best_iteration"]
+        or not math.isclose(booster.best_score, metadata["best_score"], rel_tol=1e-12)
+    ):
+        raise ValueError("XGBoost training metadata best model drifted")
+    return metadata
+
+
+def _training_metadata_files(
+    context: ExportContext, source: ExportSource
+) -> tuple[DraftFile, ...]:
+    value = source.metadata.get("training_metadata")
+    if value is None:
+        return ()
+    metadata = _check_training_metadata(source.model_object, value)
+    (context.artifact_dir / "training_metadata.json").write_text(
+        json.dumps(metadata, sort_keys=True, allow_nan=False), encoding="utf-8"
+    )
+    return (DraftFile(relative_path="training_metadata.json", role="config"),)
 
 
 class XGBoostONNXOptions(BaseModel):
@@ -152,8 +180,18 @@ class OfficialXGBoostONNXExporter:
             feature_names = tuple(
                 f"f{index}" for index in range(int(booster.num_features()))
             )
+        # A raw Booster is classified heuristically from its cover values by
+        # ONNXMLTools. A short best prefix can have integral covers even for
+        # classification, so preserve the declared objective explicitly.
+        objective = json.loads(booster.save_config())["learner"]["objective"]["name"]
+        model: Any = (
+            xgboost.XGBClassifier()
+            if objective.startswith(("binary:", "multi:"))
+            else xgboost.XGBRegressor()
+        )
+        model.load_model(bytearray(booster.save_raw(raw_format="ubj")))
         converted = onnxmltools.convert_xgboost(
-            booster,
+            model,
             initial_types=[
                 ("float_input", FloatTensorType([None, len(feature_names)]))
             ],
@@ -166,7 +204,10 @@ class OfficialXGBoostONNXExporter:
             name=target.target.name,
             format="onnx",
             flavor_id="onnx-runtime-v1",
-            files=(DraftFile(relative_path="model.onnx", role="model"),),
+            files=(
+                DraftFile(relative_path="model.onnx", role="model"),
+                *_training_metadata_files(context, source),
+            ),
             entrypoint="model.onnx",
             producer=ProducerInfo(
                 exporter_id=self.exporter_id,
@@ -224,6 +265,7 @@ class OfficialXGBoostUBJExporter:
             bytes(booster.save_raw(raw_format="ubj"))
         )
         files = [DraftFile(relative_path="model.ubj", role="model")]
+        files.extend(_training_metadata_files(context, source))
         feature_names = tuple(
             booster.feature_names or source.feature_schema.get("feature_names", ())
         )
@@ -269,6 +311,20 @@ class OfficialXGBoostNativeValidator:
             started = time.perf_counter()
             loaded = xgboost.Booster()
             loaded.load_model(str(artifact.entrypoint_path))
+            metadata_path = artifact.path_for("training_metadata.json")
+            expected_metadata = source.metadata.get("training_metadata")
+            if expected_metadata is not None and not metadata_path.is_file():
+                raise ValueError("XGBoost training metadata sidecar is missing")
+            if metadata_path.is_file():
+                metadata = _check_training_metadata(
+                    loaded, json.loads(metadata_path.read_text(encoding="utf-8"))
+                )
+                if (
+                    expected_metadata is not None
+                    and metadata
+                    != _check_training_metadata(source_booster, expected_metadata)
+                ):
+                    raise ValueError("XGBoost training metadata sidecar drifted")
             features = int(loaded.num_features())
             if features != int(source_booster.num_features()) or features < 1:
                 raise ValueError("reloaded Booster feature count drifted")
@@ -277,10 +333,14 @@ class OfficialXGBoostNativeValidator:
                 dtype=np.float32,
             )
             source_margin = source_booster.predict(
-                xgboost.DMatrix(values), output_margin=True, strict_shape=True
+                xgboost.DMatrix(values, feature_names=source_booster.feature_names),
+                output_margin=True,
+                strict_shape=True,
             )
             loaded_margin = loaded.predict(
-                xgboost.DMatrix(values), output_margin=True, strict_shape=True
+                xgboost.DMatrix(values, feature_names=loaded.feature_names),
+                output_margin=True,
+                strict_shape=True,
             )
             if not np.allclose(source_margin, loaded_margin, rtol=1e-6, atol=1e-7):
                 raise ValueError("reloaded Booster predictions drifted")

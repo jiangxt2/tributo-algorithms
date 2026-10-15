@@ -96,7 +96,7 @@ def test_root_metadata_declares_one_distribution_and_all_domain_extras() -> None
     project = tomllib.loads((_ROOT / "pyproject.toml").read_text())
 
     assert project["project"]["name"] == "tributo-algorithms"
-    assert project["project"]["dependencies"] == ["tributo>=1.1"]
+    assert project["project"]["dependencies"] == ["tributo>=1.2"]
     entry_points = project["project"]["entry-points"]
     assert len(entry_points["tributo.algorithms"]) == 37
     assert len(entry_points["tributo.exporters"]) == 9
@@ -140,7 +140,7 @@ def test_root_metadata_declares_one_distribution_and_all_domain_extras() -> None
 
 @pytest.mark.parametrize(
     ("version", "accepted"),
-    [("1.0.0", False), ("1.1.0", True), ("1.2.0.dev0", True), ("1.2.0", True)],
+    [("1.0.0", False), ("1.1.0", False), ("1.2.0.dev0", False), ("1.2.0", True)],
 )
 def test_core_dependencies_keep_only_the_minimum_version(
     version: str, accepted: bool
@@ -161,7 +161,7 @@ def test_core_dependencies_keep_only_the_minimum_version(
     ]
     assert core_requirements
     for requirement in core_requirements:
-        assert requirement.specifier == SpecifierSet(">=1.1")
+        assert requirement.specifier == SpecifierSet(">=1.2")
         assert requirement.specifier.contains(version, prereleases=True) is accepted
 
 
