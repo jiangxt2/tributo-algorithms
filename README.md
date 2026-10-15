@@ -46,9 +46,11 @@ the same range. PyG's module import uses TorchScript APIs deprecated in Torch
 
 ## Core compatibility
 
-The distribution, domain extras, and algorithm descriptors require Tributo Core
-`>=1.1` without an upper version bound. Versions below 1.1 are outside the
-declared compatibility range. An open upper bound does not certify future Core
+The distribution and domain extras require Tributo Core `>=1.2` without an
+upper version bound. The XGBoost descriptor also requires `>=1.2` for optional
+input routing; other descriptors retain their own minimum versions. Versions
+below 1.2 are outside this distribution's declared compatibility range.
+An open upper bound does not certify future Core
 releases; execution support is established by the Gate for its exact Core
 version, algorithm Wheel, and runtime image. Lock those versions in consuming
 projects for reproducible deployments.
@@ -85,14 +87,62 @@ Release the aggregate distribution with a single
 publishes the same checksummed files to TestPyPI, verifies the installed
 metadata, then publishes those files to PyPI.
 
+## XGBoost validation and early stopping
+
+XGBoost accepts a required `train` binding and an optional `validation` binding
+through `InputBindingSet`, with `train` as the primary role. Both inputs must
+declare the same ordered features and label column and provide compatible
+numeric schemas. Validation rows are evaluated separately and never enter the
+training gradient matrix. Both roles use lossless partitioning and report
+their own `input_rows` counts for Core validation.
+
+For validation-driven model selection, include these fields in the existing
+`algorithm_config` (alongside its `data`, `ray`, and `output` configuration):
+
+```json
+{
+  "model": {"objective": "binary:logistic", "eval_metric": "logloss"},
+  "training": {
+    "num_rounds": 1000,
+    "early_stopping_rounds": 20,
+    "maximize": false
+  }
+}
+```
+
+Early stopping requires validation, one explicit `model.eval_metric` string,
+positive integer patience, and an explicit boolean `training.maximize`.
+Patience may exceed the round limit. The native XGBoost callback selects the
+best prefix even when the round limit is reached before patience expires.
+Linear Boosters cannot export this selected prefix. A provided validation
+shard must be non-empty on every Worker, matching the current train-shard
+restriction. Invalid inputs or non-finite selection scores fail training.
+
+Omit early-stopping fields to preserve fixed-round training. Validation can
+still be provided for evaluation; train-only requests remain supported.
+Execution metrics distinguish `training_rounds` (executed rounds) from
+`model_rounds` (rounds in the exported model). Early-stopped fits additionally
+return zero-based `best_iteration`, `best_score`, `selection_metric`, and
+`maximize`. The `train-*` and `validation-*` metrics describe the last executed
+round; `best_score` describes the selected round. Both ONNX and native UBJ
+artifacts contain the selected model and a digest-checked
+`training_metadata.json` sidecar. Best-model selection does
+not depend on a consumer supplying an iteration range at prediction time.
+
+For H&M, use validation logloss for stopping. XGBoost's distributed AUC is an
+[approximation](https://xgboost.readthedocs.io/en/stable/parameter.html#learning-task-parameters).
+Compute AP, ROC-AUC, and Lift over the complete held-out predictions and labels
+in the calling application. Periodic checkpoints and same-run recovery are
+tracked separately in issue #8; this change retains the resume rejection.
+
 ## XGBoost Worker Gate
 
 XGBoost consumes replayable Ray Train shards in batches of at most 65,536 rows.
 The existing Core Framework Native and multi-stage entry points share this
 Worker loop; Core continues to manage execution and Bundle delivery.
 
-The Gate requires a two-node Ray 2.55.1 cluster with the same fixed Tributo Core
-1.1.0 and algorithm Wheels installed on every node, together with the
+The Gate targets a two-node Docker Ray 2.59.0 cluster with the same fixed
+Tributo Core 1.2.0 and algorithm Wheels installed on every node, together with the
 `boosting` extra. Use a shared directory mounted at the same absolute path on
 both nodes. Submit from this repository through Ray Jobs:
 
@@ -103,7 +153,10 @@ ray job submit --address "$RAY_DASHBOARD_URL" --working-dir . \
 
 `GATE_SHARED_ROOT` must name a new directory. The job checks the Core execution
 path and `XGBoostStageRunner` with two Workers on different nodes, 131,075 input
-rows, three boosting rounds, synchronized model digests, checkpoint recovery,
-and ONNX/native Bundle artifacts. It preserves `result.json` and model outputs
+train rows, 131,077 validation rows, synchronized model digests, train-only
+and validation fits, early stopping, selected-model reload, and ONNX/native
+Bundle artifacts. A separate bounded routing fixture verifies row identities
+for both input roles, and an empty validation case must fail without publishing
+a Bundle. It preserves `result.json` and model outputs
 under that directory. This targeted Gate does not certify other runtime images
 or execution profiles.

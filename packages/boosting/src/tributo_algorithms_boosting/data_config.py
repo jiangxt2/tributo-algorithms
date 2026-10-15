@@ -26,11 +26,8 @@ class CompleteCoverageDataConfig(DataConfig):
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
         del worker_handles, kwargs
-        # This mirrors Ray's public DataConfig implementation while changing
-        # only ``equal``.  The remaining setup preserves Train's resource
-        # exclusion and locality behavior.
-        from ray.data import ExecutionResources
-
+        # Ray 2.59.0 compatibility: retain its execution-option resolution
+        # and locality setup, changing only streaming_split's ``equal``.
         output: list[dict[str, Any]] = [{} for _ in range(world_size)]
         for dataset_name, dataset in datasets.items():
             if dataset.name is None:
@@ -42,21 +39,8 @@ class CompleteCoverageDataConfig(DataConfig):
             datasets_to_split = set(self._datasets_to_split)
         locality_hints = worker_node_ids if self._enable_shard_locality else None
         for name, dataset in datasets.items():
-            execution_options = self._get_execution_options(name)
-            if (
-                execution_options.is_resource_limits_default()
-                and not self._is_v2_autoscaler()
-            ):
-                execution_options.exclude_resources = (
-                    execution_options.exclude_resources.add(
-                        ExecutionResources(
-                            cpu=self._num_train_cpus,
-                            gpu=self._num_train_gpus,
-                        )
-                    )
-                )
             dataset = dataset.copy(dataset)
-            dataset.context.execution_options = execution_options
+            dataset.context.execution_options = self._resolve_execution_options(name)
             if name in datasets_to_split:
                 for index, split in enumerate(
                     dataset.streaming_split(

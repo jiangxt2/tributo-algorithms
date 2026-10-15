@@ -10,6 +10,7 @@ from tributo.algorithms.api import (
     EnvironmentSpec,
     ExecutionMode,
     ExecutionProfile,
+    FrameworkNativeInputRoute,
     FrameworkNativePolicy,
     QualifiedReference,
     WorkerRange,
@@ -80,8 +81,9 @@ XGBOOST_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
         environment_id="tributo.official.boosting.v1",
         dependencies=(
             "onnxmltools>=1.13",
+            "scikit-learn>=1.4,<2",
             "xgboost>=2.1,<4",
-            "tributo>=1.1",
+            "tributo>=1.2",
             f"tributo-algorithms[boosting]=={_VERSION}",
         ),
     ),
@@ -95,10 +97,14 @@ XGBOOST_DESCRIPTOR = AlgorithmBuilder.from_distributed_algorithm(
         evidence_collector_ref=(
             "tributo_algorithms_boosting.algorithm:DistributedXGBoost.collect_evidence"
         ),
+        input_routes=(
+            FrameworkNativeInputRoute("train", "partitioned"),
+            FrameworkNativeInputRoute("validation", "partitioned", required=False),
+        ),
     ),
     package_name=_PACKAGE,
     package_version=_VERSION,
-    tributo_version_spec=">=1.1",
+    tributo_version_spec=">=1.2",
     exporter="tributo_algorithms_boosting.algorithm:export_result",
     flavor_id="onnx-runtime-v1",
     contract_bindings=ContractBindingSet(

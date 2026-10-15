@@ -48,12 +48,15 @@ for entry_point in importlib.metadata.entry_points(group="tributo.algorithms"):
         continue
     descriptor = entry_point.load()
     core_specifier = SpecifierSet(descriptor.tributo_version_spec)
-    if core_specifier != SpecifierSet(">=1.1"):
+    minimum = "1.2" if entry_point.name == "xgboost.framework_native" else "1.1"
+    if core_specifier != SpecifierSet(f">={minimum}"):
         raise AssertionError("official descriptor changed the Core minimum or added an upper bound")
     if core_specifier.contains("1.0.0", prereleases=True):
         raise AssertionError("official descriptor admitted Core below the minimum")
-    if not core_specifier.contains("1.2.0.dev0", prereleases=True):
-        raise AssertionError("official descriptor rejected the selected Core development version")
+    if not core_specifier.contains("1.2.0", prereleases=True):
+        raise AssertionError("official descriptor rejected the selected Core release")
+    if not core_specifier.contains("1.3.0.dev0", prereleases=True):
+        raise AssertionError("official descriptor added a Core upper bound")
     core_dependencies = tuple(
         dependency
         for value in descriptor.registration.environment.dependencies

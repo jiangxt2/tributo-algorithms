@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import gc
 import hashlib
+import json
+import math
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -16,6 +19,11 @@ from tributo.algorithms.api import (
 )
 from tributo.algorithms.spi import FrameworkNativeAlgorithm
 
+from tributo_algorithms_boosting.contracts import (
+    XGBoostInputValidator,
+    _validate_training_metadata,
+    _validate_training_options,
+)
 from tributo_algorithms_boosting.data_config import CompleteCoverageDataConfig
 
 _XGBOOST_BATCH_ROWS = 65_536
@@ -38,9 +46,6 @@ class _EvidenceCollector:
 
 
 def _train_loop(config: dict[str, Any]) -> None:
-    import gc
-    import json
-
     import ray
     import xgboost
     from ray import train
@@ -48,21 +53,40 @@ def _train_loop(config: dict[str, Any]) -> None:
 
     feature_names = list(config["feature_names"])
     label_name = str(config["label_name"])
-    rounds = config["num_boost_round"]
-    if not isinstance(rounds, int) or isinstance(rounds, bool) or rounds < 1:
-        raise AlgorithmExecutionError("XGBoost num_boost_round must be positive")
+    training = {"num_rounds": config["num_boost_round"]}
+    for key in ("early_stopping_rounds", "maximize"):
+        if key in config:
+            training[key] = config[key]
+    try:
+        rounds, patience, maximize = _validate_training_options(
+            training, config["params"]
+        )
+    except ValueError as exc:
+        raise AlgorithmExecutionError(str(exc)) from exc
+    roles = tuple(config.get("input_roles", ("train",)))
+    if (
+        not roles
+        or roles[0] != "train"
+        or len(set(roles)) != len(roles)
+        or set(roles) - {"train", "validation"}
+        or (patience is not None and "validation" not in roles)
+    ):
+        raise AlgorithmExecutionError(
+            "XGBoost early stopping requires validation input"
+        )
 
     class ShardDataIter(xgboost.DataIter):
-        def __init__(self, cache_prefix: str) -> None:
+        def __init__(self, role: str, cache_prefix: str) -> None:
             super().__init__(cache_prefix=cache_prefix, release_data=True)
+            self.role = role
             self.iterator: Any = None
             self.has_rows = False
 
         def reset(self) -> None:
             self.has_rows = False
-            shard = train.get_dataset_shard("train")
+            shard = train.get_dataset_shard(self.role)
             if shard is None:
-                raise AlgorithmExecutionError("XGBoost train shard is missing")
+                raise AlgorithmExecutionError(f"XGBoost {self.role} shard is missing")
             self.iterator = iter(
                 shard.iter_batches(
                     batch_format="pandas",
@@ -83,7 +107,9 @@ def _train_loop(config: dict[str, Any]) -> None:
                     )
                     return True
             if not self.has_rows:
-                raise AlgorithmExecutionError("XGBoost Worker shard is empty")
+                raise AlgorithmExecutionError(
+                    f"XGBoost {self.role} Worker shard is empty"
+                )
             return False
 
     context = train.get_context()
@@ -92,24 +118,75 @@ def _train_loop(config: dict[str, Any]) -> None:
     evidence_actor = config["evidence_actor"]
 
     with tempfile.TemporaryDirectory(prefix="tributo-xgboost-pages-") as cache_root:
-        iterator = ShardDataIter(str(Path(cache_root) / "train"))
-        dtrain = None
+        iterators: dict[str, Any] = {}
+        matrices: dict[str, Any] = {}
+        evals: list[Any] = []
+        history: dict[str, Any] = {}
         try:
-            dtrain = xgboost.DMatrix(iterator)
-            rows_processed = int(dtrain.num_row())
-            if rows_processed < 1:
+            for role in roles:
+                iterators[role] = ShardDataIter(role, str(Path(cache_root) / role))
+                matrices[role] = xgboost.DMatrix(iterators[role])
+            input_rows = {
+                role: int(matrix.num_row()) for role, matrix in matrices.items()
+            }
+            if any(rows < 1 for rows in input_rows.values()):
                 raise AlgorithmExecutionError("XGBoost Worker shard is empty")
+            callbacks = []
+            if patience is not None:
+                callbacks.append(
+                    xgboost.callback.EarlyStopping(
+                        rounds=patience,
+                        data_name="validation",
+                        maximize=maximize,
+                        save_best=True,
+                    )
+                )
+            evals = [(matrices[role], role) for role in roles]
             booster = xgboost.train(
                 dict(config["params"]),
-                dtrain,
+                matrices["train"],
                 num_boost_round=rounds,
-                evals=[(dtrain, "train")],
+                evals=evals,
+                evals_result=history,
+                callbacks=callbacks,
                 verbose_eval=False,
             )
-            actual_rounds = int(booster.num_boosted_rounds())
+            metadata: dict[str, Any] = {
+                "schema_version": 1,
+                "training_rounds": rounds,
+                "model_rounds": int(booster.num_boosted_rounds()),
+            }
+            if patience is not None:
+                validation_history = history.get("validation", {})
+                if len(validation_history) != 1:
+                    raise AlgorithmExecutionError(
+                        "XGBoost selection metric is ambiguous"
+                    )
+                metric, scores = next(iter(validation_history.items()))
+                if not scores or any(not math.isfinite(score) for score in scores):
+                    raise AlgorithmExecutionError(
+                        "XGBoost selection scores must be finite"
+                    )
+                metadata.update(
+                    training_rounds=len(scores),
+                    best_iteration=int(booster.best_iteration),
+                    best_score=float(booster.best_score),
+                    selection_metric=f"validation-{metric}",
+                    maximize=maximize,
+                )
+            try:
+                metadata = _validate_training_metadata(metadata)
+            except ValueError as exc:
+                raise AlgorithmExecutionError(str(exc)) from exc
+            if metadata["training_rounds"] > rounds:
+                raise AlgorithmExecutionError(
+                    "XGBoost exceeded the requested training rounds"
+                )
         finally:
             # DMatrix owns external-memory pages. Release it before its cache directory.
-            del dtrain, iterator
+            evals.clear()
+            matrices.clear()
+            iterators.clear()
             gc.collect()
 
     raw = bytes(booster.save_raw(raw_format="ubj"))
@@ -124,10 +201,10 @@ def _train_loop(config: dict[str, Any]) -> None:
         "shard_id": hashlib.sha256(
             f"{config['binding_digest']}:{rank}/{world_size}".encode("ascii")
         ).hexdigest(),
-        "rows_processed": rows_processed,
-        "input_rows": {"train": rows_processed},
-        "batch_count": actual_rounds,
-        "collective_steps": actual_rounds,
+        "rows_processed": input_rows["train"],
+        "input_rows": input_rows,
+        "batch_count": metadata["training_rounds"],
+        "collective_steps": metadata["training_rounds"],
         "model_state_digest": digest,
         "resources": {
             "num_cpus": float(assigned.get("CPU", 0.0)),
@@ -139,14 +216,27 @@ def _train_loop(config: dict[str, Any]) -> None:
             },
         },
     }
+    metrics = {
+        "model_state_digest": digest,
+        **{key: value for key, value in metadata.items() if key != "schema_version"},
+    }
+    for role, values in history.items():
+        for metric, scores in values.items():
+            if not scores or not math.isfinite(scores[-1]):
+                raise AlgorithmExecutionError(
+                    "XGBoost evaluation scores must be finite"
+                )
+            metrics[f"{role}-{metric}"] = scores[-1]
     ray.get(evidence_actor.record.remote(evidence))
-    metrics = {"model_state_digest": digest, "training_rounds": actual_rounds}
     if rank == 0:
         with tempfile.TemporaryDirectory(prefix="tributo-xgboost-") as directory:
             root = Path(directory)
             booster.save_model(root / "model.ubj")
             (root / "feature_names.json").write_text(
                 json.dumps(feature_names), encoding="utf-8"
+            )
+            (root / "training_metadata.json").write_text(
+                json.dumps(metadata, sort_keys=True, allow_nan=False), encoding="utf-8"
             )
             train.report(metrics, checkpoint=Checkpoint.from_directory(root))
     else:
@@ -176,9 +266,17 @@ class DistributedXGBoost(FrameworkNativeAlgorithm):
             raise AlgorithmConfigurationError("XGBoost environment is invalid")
 
     def bind_datasets(self, datasets: Mapping[str, object]) -> Mapping[str, object]:
-        if len(datasets) != 1:
-            raise AlgorithmConfigurationError("XGBoost requires one train Dataset")
-        dataset = next(iter(datasets.values()))
+        try:
+            XGBoostInputValidator().validate(
+                self.plan.input_bindings.descriptor_payload()
+            )
+        except ValueError as exc:
+            raise AlgorithmConfigurationError(str(exc)) from exc
+        expected_roles = {binding.name for binding in self.plan.input_bindings.bindings}
+        if set(datasets) != expected_roles:
+            raise AlgorithmConfigurationError(
+                "XGBoost Dataset roles must match bindings"
+            )
         data = cast(Mapping[str, Any], self.plan.algorithm_config.get("data", {}))
         configured_features = tuple(data.get("feature_columns", ()))
         binding = self.plan.primary_input_binding
@@ -191,11 +289,46 @@ class DistributedXGBoost(FrameworkNativeAlgorithm):
             raise AlgorithmConfigurationError(
                 "XGBoost data.label_col must match InputBinding label"
             )
-        return {
-            "train": cast(Any, dataset).select_columns(
-                [*feature_names, cast(str, binding.label_name)]
+        training = cast(
+            Mapping[str, Any], self.plan.algorithm_config.get("training", {})
+        )
+        if (
+            training.get("early_stopping_rounds") is not None
+            and "validation" not in datasets
+        ):
+            raise AlgorithmConfigurationError(
+                "XGBoost early stopping requires validation input"
             )
-        }
+        import pyarrow as pa
+        from pandas.api.types import is_numeric_dtype
+
+        columns = [*feature_names, cast(str, binding.label_name)]
+        output: dict[str, object] = {}
+        for role in ("train", "validation"):
+            if role not in datasets:
+                continue
+            dataset = cast(Any, datasets[role])
+            schema = dataset.schema()
+            if schema is None:
+                raise AlgorithmConfigurationError(
+                    f"XGBoost {role} schema is unavailable"
+                )
+            types = dict(zip(schema.names, schema.types, strict=True))
+            for column in columns:
+                dtype = types.get(column)
+                numeric = (
+                    pa.types.is_integer(dtype)
+                    or pa.types.is_floating(dtype)
+                    or pa.types.is_boolean(dtype)
+                    if isinstance(dtype, pa.DataType)
+                    else dtype is not None and is_numeric_dtype(dtype)
+                )
+                if not numeric:
+                    raise AlgorithmConfigurationError(
+                        f"XGBoost {role} column {column!r} must exist and be numeric"
+                    )
+            output[role] = dataset.select_columns(columns)
+        return output
 
     def build_trainer(
         self,
@@ -211,6 +344,7 @@ class DistributedXGBoost(FrameworkNativeAlgorithm):
         training = cast(Mapping[str, Any], config.get("training", {}))
         ray_config = cast(Mapping[str, Any], config.get("ray", {}))
         binding = self.plan.primary_input_binding
+        rounds, patience, maximize = _validate_training_options(training, model)
         collector_type = ray.remote(_EvidenceCollector).options(num_cpus=0)
         self.collector = collector_type.remote()
         return XGBoostTrainer(
@@ -219,7 +353,13 @@ class DistributedXGBoost(FrameworkNativeAlgorithm):
                 "feature_names": list(binding.feature_names),
                 "label_name": str(data["label_col"]),
                 "params": model,
-                "num_boost_round": int(training.get("num_rounds", 10)),
+                "num_boost_round": rounds,
+                "input_roles": list(datasets),
+                **(
+                    {"early_stopping_rounds": patience, "maximize": maximize}
+                    if patience is not None
+                    else {}
+                ),
                 "evidence_actor": self.collector,
                 "binding_digest": self.plan.primary_input_descriptor.binding_digest,
             },
@@ -234,7 +374,7 @@ class DistributedXGBoost(FrameworkNativeAlgorithm):
                 },
             ),
             datasets=cast(dict[str, Any], dict(datasets)),
-            dataset_config=CompleteCoverageDataConfig(datasets_to_split=["train"]),
+            dataset_config=CompleteCoverageDataConfig(datasets_to_split=list(datasets)),
             run_config=RunConfig(
                 name="tributo-official-xgboost",
                 storage_path=str(ray_config["storage_path"]),
@@ -293,8 +433,6 @@ def export_result(
     plan: ResolvedAlgorithmPlan,
     run_id: str,
 ) -> AlgorithmExecutionResult:
-    import json
-
     import xgboost
     from tributo.exporting.models import (
         BundleOutputConfig,
@@ -305,7 +443,29 @@ def export_result(
     )
     from tributo.exporting.service import BundleExportService
 
-    del result
+    from tributo_algorithms_boosting.native import _check_training_metadata
+
+    raw_metrics = getattr(result, "metrics", {})
+    if not isinstance(raw_metrics, Mapping):
+        raise AlgorithmExecutionError("XGBoost result metrics must be a mapping")
+    metrics: dict[str, Any] = {}
+    for key, value in raw_metrics.items():
+        if isinstance(key, str) and key.startswith(("train-", "validation-")):
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+            ):
+                raise AlgorithmExecutionError(
+                    "XGBoost evaluation scores must be finite"
+                )
+            metrics[key] = float(value)
+        elif key == "training_rounds":
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise AlgorithmExecutionError(
+                    "XGBoost reported training rounds are invalid"
+                )
+            metrics[key] = value
     output = plan.algorithm_config.get("output")
     if not isinstance(output, Mapping) or not isinstance(output.get("bundle_uri"), str):
         raise AlgorithmConfigurationError("XGBoost output.bundle_uri is required")
@@ -313,6 +473,34 @@ def export_result(
         root = Path(directory)
         booster = xgboost.Booster()
         booster.load_model(root / "model.ubj")
+        metadata_path = root / "training_metadata.json"
+        try:
+            metadata = (
+                _validate_training_metadata(
+                    json.loads(metadata_path.read_text(encoding="utf-8"))
+                )
+                if metadata_path.is_file()
+                else None
+            )
+            if metadata is not None:
+                _check_training_metadata(booster, metadata)
+        except (ValueError, OSError, AttributeError) as exc:
+            raise AlgorithmExecutionError(
+                "XGBoost checkpoint training metadata is invalid"
+            ) from exc
+        training = cast(Mapping[str, Any], plan.algorithm_config.get("training", {}))
+        if training.get("early_stopping_rounds") is not None and metadata is None:
+            raise AlgorithmExecutionError(
+                "XGBoost early stopping checkpoint metadata is missing"
+            )
+        if metadata is not None:
+            metrics.update(
+                {
+                    key: value
+                    for key, value in metadata.items()
+                    if key != "schema_version"
+                }
+            )
         feature_names = tuple(
             json.loads((root / "feature_names.json").read_text(encoding="utf-8"))
         )
@@ -358,6 +546,7 @@ def export_result(
         source_fingerprint = hashlib.sha256(
             bytes(booster.save_raw(raw_format="ubj"))
         ).hexdigest()
+        metrics["model_state_digest"] = source_fingerprint
         source = ExportSource(
             source_kind="xgboost_result",
             model_object=booster,
@@ -368,6 +557,7 @@ def export_result(
                 "framework_versions": {"xgboost": xgboost.__version__},
                 "objective": objective,
                 "producer_distribution": "tributo-algorithms",
+                **({"training_metadata": metadata} if metadata is not None else {}),
             },
             source_fingerprint=source_fingerprint,
             checkpoint_contract=checkpoint_contract,
@@ -395,6 +585,7 @@ def export_result(
         )
     return AlgorithmExecutionResult(
         status="succeeded",
+        metrics=metrics,
         outputs={
             "bundle_id": bundle.bundle_id,
             "bundle_uri": bundle.canonical_uri,

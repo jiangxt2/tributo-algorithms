@@ -40,13 +40,18 @@ def _worker(
     frame: pd.DataFrame | None,
     *,
     rank: int = 0,
+    validation: _Shard | None = None,
 ) -> tuple[_Shard | None, list[dict[str, Any]], list[dict[str, Any]]]:
     shard = _Shard(frame) if frame is not None else None
     evidence: list[dict[str, Any]] = []
     reports: list[dict[str, Any]] = []
     monkeypatch.setattr(algorithm, "_XGBOOST_BATCH_ROWS", 2)
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
-    monkeypatch.setattr(train, "get_dataset_shard", lambda _name: shard)
+    monkeypatch.setattr(
+        train,
+        "get_dataset_shard",
+        lambda name: shard if name == "train" else validation,
+    )
     monkeypatch.setattr(
         train,
         "get_context",
@@ -72,6 +77,9 @@ def _worker(
                     "model": (root / "model.ubj").read_bytes(),
                     "features": json.loads(
                         (root / "feature_names.json").read_text(encoding="utf-8")
+                    ),
+                    "training": json.loads(
+                        (root / "training_metadata.json").read_text(encoding="utf-8")
                     ),
                 }
         reports.append(item)
@@ -196,3 +204,136 @@ def test_worker_rejects_missing_columns_without_reporting_success(
 
 def test_stage_runner_uses_the_same_worker_loop() -> None:
     assert stages._train_loop is algorithm._train_loop
+
+
+@pytest.mark.parametrize("rounds,patience", [(20, 2), (3, 50)])
+def test_validation_selects_a_physical_best_prefix(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rounds: int, patience: int
+) -> None:
+    validation_frame = _frame().iloc[:5].copy()
+    validation_frame["label"] = 1 - validation_frame["label"]
+    validation = _Shard(validation_frame)
+    shard, evidence, reports = _worker(
+        monkeypatch, tmp_path, _frame(), validation=validation
+    )
+    config = _config(evidence)
+    config.update(
+        input_roles=["train", "validation"],
+        num_boost_round=rounds,
+        early_stopping_rounds=patience,
+        maximize=False,
+    )
+    config["params"].update(eval_metric="logloss", min_child_weight=0, max_depth=1)
+    algorithm._train_loop(config)
+
+    assert shard is not None and shard.calls and validation.calls
+    assert max(validation.batch_sizes) == 2 and 1 in validation.batch_sizes
+    assert len(evidence) == len(reports) == 1
+    assert evidence[0]["input_rows"] == {"train": 7, "validation": 5}
+    metadata = reports[0]["checkpoint"]["training"]
+    assert metadata["model_rounds"] == metadata["best_iteration"] + 1
+    assert metadata["model_rounds"] < metadata["training_rounds"] <= rounds
+    assert evidence[0]["collective_steps"] == metadata["training_rounds"]
+    assert metadata["selection_metric"] == "validation-logloss"
+    assert metadata["maximize"] is False
+    assert (
+        reports[0]["metrics"]["best_score"]
+        < reports[0]["metrics"]["validation-logloss"]
+    )
+    if patience > rounds:
+        assert metadata["training_rounds"] == rounds
+
+    restored = xgboost.Booster()
+    restored.load_model(bytearray(reports[0]["checkpoint"]["model"]))
+    assert restored.num_boosted_rounds() == metadata["model_rounds"]
+    matrix = xgboost.DMatrix(_frame()[["b", "a"]].to_numpy(), label=_frame()["label"])
+    last = xgboost.train(
+        config["params"], matrix, num_boost_round=metadata["training_rounds"]
+    )
+    np.testing.assert_allclose(
+        restored.predict(matrix),
+        last.predict(matrix, iteration_range=(0, metadata["model_rounds"])),
+    )
+    assert not np.allclose(restored.predict(matrix), last.predict(matrix))
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_validation_is_evaluated_without_entering_training_gradients(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    validation_frame = _frame().copy()
+    validation_frame["label"] = 1 - validation_frame["label"]
+    _, evidence, reports = _worker(
+        monkeypatch, tmp_path, _frame(), validation=_Shard(validation_frame)
+    )
+    config = _config(evidence)
+    config["input_roles"] = ["train", "validation"]
+    config["params"]["min_child_weight"] = 0
+    algorithm._train_loop(config)
+    restored = xgboost.Booster()
+    restored.load_model(bytearray(reports[0]["checkpoint"]["model"]))
+    matrix = xgboost.DMatrix(_frame()[["b", "a"]].to_numpy(), label=_frame()["label"])
+    baseline = xgboost.train(config["params"], matrix, num_boost_round=3)
+    np.testing.assert_allclose(restored.predict(matrix), baseline.predict(matrix))
+    assert (
+        reports[0]["metrics"]["validation-logloss"]
+        > reports[0]["metrics"]["train-logloss"]
+    )
+    assert "best_iteration" not in reports[0]["metrics"]
+
+
+def test_worker_uses_explicit_metric_direction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    validation_frame = _frame().copy()
+    validation_frame["label"] = 1 - validation_frame["label"]
+    _, evidence, reports = _worker(
+        monkeypatch, tmp_path, _frame(), validation=_Shard(validation_frame)
+    )
+    config = _config(evidence)
+    config.update(
+        input_roles=["train", "validation"],
+        num_boost_round=4,
+        early_stopping_rounds=1,
+        maximize=True,
+    )
+    config["params"].update(eval_metric="logloss", min_child_weight=0)
+    algorithm._train_loop(config)
+    metadata = reports[0]["checkpoint"]["training"]
+    assert metadata["maximize"] is True
+    assert metadata["best_iteration"] == 3
+    assert metadata["model_rounds"] == metadata["training_rounds"] == 4
+    assert metadata["best_score"] == reports[0]["metrics"]["validation-logloss"]
+
+
+def test_worker_rejects_early_stopping_without_validation_before_reading(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    shard, evidence, reports = _worker(monkeypatch, tmp_path, _frame())
+    config = _config(evidence)
+    config.update(early_stopping_rounds=2, maximize=False)
+    config["params"]["eval_metric"] = "logloss"
+    with pytest.raises(AlgorithmExecutionError, match="requires validation"):
+        algorithm._train_loop(config)
+    assert shard is not None and not shard.calls
+    assert not evidence and not reports
+
+
+@pytest.mark.parametrize("validation", [None, _frame().iloc[:0]])
+def test_worker_rejects_missing_or_empty_validation_without_success(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, validation: pd.DataFrame | None
+) -> None:
+    _, evidence, reports = _worker(
+        monkeypatch,
+        tmp_path,
+        _frame(),
+        validation=_Shard(validation) if validation is not None else None,
+    )
+    config = _config(evidence)
+    config["input_roles"] = ["train", "validation"]
+    with pytest.raises(
+        AlgorithmExecutionError, match="validation.*shard is (missing|empty)"
+    ):
+        algorithm._train_loop(config)
+    assert not evidence and not reports
+    assert list(tmp_path.iterdir()) == []
