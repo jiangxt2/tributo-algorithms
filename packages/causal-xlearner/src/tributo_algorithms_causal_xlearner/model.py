@@ -10,10 +10,10 @@ import numpy as np
 STAGES = ("mu0", "mu1", "tau0", "tau1", "propensity")
 FORMULA = "cate=propensity*tau0+(1-propensity)*tau1"
 QUADRANT_CODES = {
-    "low_response_low_uplift": 0,
-    "low_response_high_uplift": 1,
-    "high_response_low_uplift": 2,
-    "high_response_high_uplift": 3,
+    "persuadable": 1,
+    "sure_thing": 2,
+    "lost_cause": 3,
+    "sleeping_dog": 4,
 }
 STAGE_OBJECTIVES = {
     "mu0": "reg:squarederror",
@@ -83,16 +83,19 @@ class XLearnerModel:
         cate = (
             propensity * predictions["tau0"] + (1.0 - propensity) * predictions["tau1"]
         )
-        response = np.maximum(predictions["mu0"], predictions["mu1"])
-        high_response = response >= self.response_threshold
-        high_uplift = cate >= 0.0
+        control_response = predictions["mu0"] >= self.response_threshold
+        treated_response = predictions["mu1"] >= self.response_threshold
         quadrant = np.where(
-            high_response,
+            control_response,
             np.where(
-                high_uplift, "high_response_high_uplift", "high_response_low_uplift"
+                treated_response,
+                "sure_thing",
+                "sleeping_dog",
             ),
             np.where(
-                high_uplift, "low_response_high_uplift", "low_response_low_uplift"
+                treated_response,
+                "persuadable",
+                "lost_cause",
             ),
         )
         return XLearnerPrediction(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -24,7 +25,25 @@ from tributo_algorithms_causal_xlearner.algorithm import (
 )
 from tributo_algorithms_causal_xlearner.contracts import XLearnerConfigValidator
 from tributo_algorithms_causal_xlearner.exporter import XLearnerONNXExporter
+from tributo_algorithms_causal_xlearner.metrics import (
+    _PREFIX_RECORD,
+    _RECORD_TYPE_COLUMN,
+    _SUMMARY_RECORD,
+    CATE_COLUMN,
+    CONTRIBUTION_COLUMN,
+    IDENTITY_COLUMN,
+    MU0_COLUMN,
+    MU1_COLUMN,
+    OUTCOME_COLUMN,
+    QUADRANT_COLUMN,
+    TREATMENT_COLUMN,
+    _attach_stable_tie_breaker,
+    _build_report,
+    _OrderedMetricScan,
+    evaluate_xlearner_dataset,
+)
 from tributo_algorithms_causal_xlearner.model import (
+    QUADRANT_CODES,
     STAGE_OBJECTIVES,
     STAGES,
     XLearnerModel,
@@ -236,3 +255,366 @@ def test_xlearner_treatment_validation_rejects_missing_column() -> None:
         _validate_treatment_batch(
             pd.DataFrame({"outcome": [1.0]}), treatment_name="treatment"
         )
+
+
+class _Booster:
+    def __init__(self, values: list[float]) -> None:
+        self.values = np.asarray(values, dtype=np.float32)
+
+    def predict(self, _matrix: object) -> np.ndarray:
+        return self.values
+
+
+def test_xlearner_quadrants_follow_potential_response_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+    from types import SimpleNamespace
+
+    monkeypatch.setitem(
+        sys.modules,
+        "xgboost",
+        SimpleNamespace(DMatrix=lambda values, **_kwargs: values),
+    )
+    model = XLearnerModel(
+        {
+            "mu0": _Booster([0.1, 0.8, 0.1, 0.8]),
+            "mu1": _Booster([0.8, 0.8, 0.1, 0.1]),
+            "tau0": _Booster([0.2, 0.0, 0.0, -0.2]),
+            "tau1": _Booster([0.2, 0.0, 0.0, -0.2]),
+            "propensity": _Booster([0.5, 0.5, 0.5, 0.5]),
+        },
+        feature_names=("x0",),
+        response_threshold=0.5,
+        propensity_clip=(0.01, 0.99),
+    )
+
+    result = model.predict(np.arange(4, dtype=np.float32).reshape(-1, 1))
+
+    assert result.quadrant.tolist() == [
+        "persuadable",
+        "sure_thing",
+        "lost_cause",
+        "sleeping_dog",
+    ]
+    assert QUADRANT_CODES == {
+        "persuadable": 1,
+        "sure_thing": 2,
+        "lost_cause": 3,
+        "sleeping_dog": 4,
+    }
+
+
+def test_xlearner_report_contains_complete_uplift_evaluation() -> None:
+    summary: dict[str, object] = {
+        "positive_contribution_count": 1,
+        "zero_contribution_count": 2,
+        "negative_contribution_count": 1,
+    }
+    for name, treatment, outcome in (
+        ("persuadable", 1, 1),
+        ("sure_thing", 0, 0),
+        ("lost_cause", 1, 0),
+        ("sleeping_dog", 0, 1),
+    ):
+        summary[f"quadrant.{name}.count"] = 1
+        summary[f"quadrant.{name}.treated_count"] = treatment
+        summary[f"quadrant.{name}.control_count"] = 1 - treatment
+        summary[f"quadrant.{name}.treated_outcome_sum"] = outcome if treatment else 0
+        summary[f"quadrant.{name}.control_outcome_sum"] = (
+            outcome if not treatment else 0
+        )
+    prefixes = {
+        1: {
+            "gain": 1.0,
+            "cate_sum": 0.4,
+            "treated_count": 1.0,
+            "control_count": 0.0,
+            "treated_outcome_sum": 1.0,
+            "control_outcome_sum": 0.0,
+        },
+        2: {
+            "gain": 1.0,
+            "cate_sum": 0.6,
+            "treated_count": 1.0,
+            "control_count": 1.0,
+            "treated_outcome_sum": 1.0,
+            "control_outcome_sum": 0.0,
+        },
+        3: {
+            "gain": 1.0,
+            "cate_sum": 0.5,
+            "treated_count": 2.0,
+            "control_count": 1.0,
+            "treated_outcome_sum": 1.0,
+            "control_outcome_sum": 0.0,
+        },
+        4: {
+            "gain": 0.0,
+            "cate_sum": 0.2,
+            "treated_count": 2.0,
+            "control_count": 2.0,
+            "treated_outcome_sum": 1.0,
+            "control_outcome_sum": 1.0,
+        },
+    }
+
+    report = _build_report(
+        summaries=[summary],
+        prefixes=prefixes,
+        rows=4,
+        treated_rows=2,
+        control_rows=2,
+        fold_count=2,
+        n_points=5,
+        n_bins=2,
+    )
+
+    assert report["ate"] == 0.05
+    assert report["upliftCurve"]["modelGain"] == [0.0, 1.0, 1.0, 1.0, 0.0]
+    assert report["evaluation"] == {
+        "method": "cross_fitted_oof",
+        "sampleSize": 4,
+    }
+    assert report["calibration"]["points"] == [
+        {"predicted": -0.2, "actual": -1.0, "count": 2, "valid": True},
+        {"predicted": 0.3, "actual": 1.0, "count": 2, "valid": True},
+    ]
+    assert [segment["label"] for segment in report["quadrant"]["segments"]] == [
+        1,
+        2,
+        3,
+        4,
+    ]
+    assert [segment["type"] for segment in report["quadrant"]["segments"]] == [
+        "persuadable",
+        "sure_thing",
+        "lost_cause",
+        "sleeping_dog",
+    ]
+
+
+def _metric_row(
+    *,
+    identity: int,
+    cate: float,
+    treatment: int,
+    outcome: float,
+    contribution: float,
+    quadrant: str,
+) -> dict[str, object]:
+    return {
+        IDENTITY_COLUMN: identity,
+        TREATMENT_COLUMN: treatment,
+        OUTCOME_COLUMN: outcome,
+        MU0_COLUMN: 0.1,
+        MU1_COLUMN: 0.9,
+        CATE_COLUMN: cate,
+        QUADRANT_COLUMN: quadrant,
+        CONTRIBUTION_COLUMN: contribution,
+    }
+
+
+def test_xlearner_tie_breaker_is_stable_across_input_order() -> None:
+    import pandas as pd
+
+    rows = [
+        _metric_row(
+            identity=7,
+            cate=0.5,
+            treatment=0,
+            outcome=0.0,
+            contribution=0.0,
+            quadrant="lost_cause",
+        ),
+        _metric_row(
+            identity=7,
+            cate=0.5,
+            treatment=1,
+            outcome=1.0,
+            contribution=1.0,
+            quadrant="persuadable",
+        ),
+        _metric_row(
+            identity=7,
+            cate=0.5,
+            treatment=0,
+            outcome=1.0,
+            contribution=-1.0,
+            quadrant="sleeping_dog",
+        ),
+    ]
+    forward = _attach_stable_tie_breaker(pd.DataFrame(rows))
+    reverse = _attach_stable_tie_breaker(pd.DataFrame(list(reversed(rows))))
+    sort_columns = [
+        CATE_COLUMN,
+        IDENTITY_COLUMN,
+        "__tributo_xlearner_tie_breaker_high",
+        "__tributo_xlearner_tie_breaker_low",
+    ]
+
+    forward = forward.sort_values(sort_columns).reset_index(drop=True)
+    reverse = reverse.sort_values(sort_columns).reset_index(drop=True)
+    pd.testing.assert_frame_equal(forward, reverse)
+
+
+def test_xlearner_ordered_scan_is_linear_for_many_identical_physical_blocks() -> None:
+    import pandas as pd
+
+    block_rows = 32
+    block_count = 128
+    total_rows = block_rows * block_count
+    frame = pd.DataFrame(
+        [
+            _metric_row(
+                identity=1,
+                cate=0.5,
+                treatment=1,
+                outcome=1.0,
+                contribution=1.0,
+                quadrant="persuadable",
+            ),
+        ]
+        * block_rows
+    )
+    scan = _OrderedMetricScan(target_ranks=list(range(1, total_rows + 1)))
+    outputs = [scan(frame) for _ in range(block_count)]
+
+    emitted_rows = sum(len(output) for output in outputs)
+    prefix_ranks = [
+        int(record["rank"])
+        for output in outputs
+        for record in output.to_dict("records")
+        if record[_RECORD_TYPE_COLUMN] == _PREFIX_RECORD
+    ]
+    summary_count = sum(
+        int((output[_RECORD_TYPE_COLUMN] == _SUMMARY_RECORD).sum())
+        for output in outputs
+    )
+    assert emitted_rows == total_rows + block_count
+    assert prefix_ranks == list(range(1, total_rows + 1))
+    assert summary_count == block_count
+    assert outputs[-1]["gain"].iloc[-1] == total_rows
+
+
+@pytest.mark.filterwarnings("ignore::FutureWarning")
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+@pytest.mark.skipif(
+    os.environ.get("TRIBUTO_REAL_RAY_TEST") != "1",
+    reason="requires an explicitly provisioned Ray worker runtime",
+)
+def test_xlearner_evaluation_handles_duplicate_keys_and_uneven_partitions() -> None:
+    import random
+    import tempfile
+
+    import ray
+
+    with tempfile.TemporaryDirectory(prefix="tributo-ray-", dir="/tmp") as ray_dir:
+        ray.init(
+            num_cpus=2,
+            include_dashboard=False,
+            log_to_driver=False,
+            _temp_dir=ray_dir,
+        )
+        try:
+            rows = [
+                _metric_row(
+                    identity=1,
+                    cate=0.8,
+                    treatment=1,
+                    outcome=1.0,
+                    contribution=1.0,
+                    quadrant="persuadable",
+                ),
+                _metric_row(
+                    identity=2,
+                    cate=0.2,
+                    treatment=0,
+                    outcome=0.0,
+                    contribution=0.0,
+                    quadrant="sure_thing",
+                ),
+                _metric_row(
+                    identity=2,
+                    cate=0.2,
+                    treatment=0,
+                    outcome=0.0,
+                    contribution=0.0,
+                    quadrant="sure_thing",
+                ),
+                _metric_row(
+                    identity=2,
+                    cate=0.2,
+                    treatment=0,
+                    outcome=1.0,
+                    contribution=-1.0,
+                    quadrant="sleeping_dog",
+                ),
+                _metric_row(
+                    identity=2,
+                    cate=0.2,
+                    treatment=1,
+                    outcome=0.0,
+                    contribution=0.0,
+                    quadrant="lost_cause",
+                ),
+                _metric_row(
+                    identity=2,
+                    cate=0.2,
+                    treatment=1,
+                    outcome=1.0,
+                    contribution=1.0,
+                    quadrant="persuadable",
+                ),
+                _metric_row(
+                    identity=2,
+                    cate=0.2,
+                    treatment=1,
+                    outcome=1.0,
+                    contribution=1.0,
+                    quadrant="persuadable",
+                ),
+                _metric_row(
+                    identity=4,
+                    cate=-0.8,
+                    treatment=0,
+                    outcome=1.0,
+                    contribution=-1.0,
+                    quadrant="sleeping_dog",
+                ),
+            ]
+            rows *= 4
+            reports = []
+            for seed, blocks in ((17, 1), (23, 3), (42, 7)):
+                shuffled = rows.copy()
+                random.Random(seed).shuffle(shuffled)
+                dataset = ray.data.from_items(
+                    shuffled,
+                    override_num_blocks=blocks,
+                )
+                reports.append(
+                    evaluate_xlearner_dataset(
+                        dataset,
+                        rows=32,
+                        treated_rows=16,
+                        control_rows=16,
+                        fold_count=2,
+                        n_points=17,
+                        n_bins=7,
+                    )
+                )
+
+            assert reports[1:] == [reports[0], reports[0]]
+            report = reports[0]
+            model_gain = report["upliftCurve"]["modelGain"]
+            assert len(model_gain) == 17
+            assert model_gain[0] == 0.0
+            assert model_gain[-1] == 4.0
+            assert report["ate"] == 0.15
+            assert report["evaluation"] == {
+                "method": "cross_fitted_oof",
+                "sampleSize": 32,
+            }
+            assert report["quadrant"]["total"] == 32
+        finally:
+            ray.shutdown()
