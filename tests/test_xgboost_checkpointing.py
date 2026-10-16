@@ -200,11 +200,21 @@ def _identity() -> dict[str, Any]:
 
 
 @pytest.fixture
-def checkpoint_files(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
+def checkpoint_files(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> tuple[Path, dict[str, Any]]:
     matrix = _matrix()
     state = training_callback(dtrain=matrix, patience=None, maximize=None, interval=0)
     model = xgboost.train(
-        {"objective": "binary:logistic", "nthread": 1},
+        {
+            "objective": "binary:logistic",
+            "nthread": 1,
+            **(
+                {"disable_default_eval_metric": True}
+                if getattr(request, "param", False)
+                else {}
+            ),
+        },
         matrix,
         num_boost_round=2,
         evals=[(matrix, "train")],
@@ -232,6 +242,71 @@ def test_checkpoint_roundtrip_retains_full_and_final_model(
     assert state["phase"] == "final" and state["completed_rounds"] == 2
 
 
+@pytest.mark.parametrize("phase", ["training", "final"])
+def test_checkpoint_roundtrip_without_evaluation_metrics(
+    tmp_path: Path, phase: str
+) -> None:
+    matrix = _matrix()
+    state = training_callback(dtrain=matrix, patience=None, maximize=None, interval=0)
+    model = xgboost.train(
+        {
+            "objective": "binary:logistic",
+            "nthread": 1,
+            "disable_default_eval_metric": True,
+        },
+        matrix,
+        num_boost_round=2,
+        evals=[(matrix, "train")],
+        callbacks=[state],
+        verbose_eval=False,
+    )
+    assert state.last_metrics == {} and state.completed == 2
+    identity = _identity()
+    write_checkpoint(
+        tmp_path,
+        full_model=state.full_model,
+        state=state,
+        identity=identity,
+        selected=bytes(model.save_raw(raw_format="ubj")) if phase == "final" else None,
+        metadata={"schema_version": 1, "training_rounds": 2, "model_rounds": 2}
+        if phase == "final"
+        else None,
+    )
+    raw, restored = read_checkpoint(
+        tmp_path, identity=identity, rounds=2, patience=None
+    )
+    assert raw == state.full_model
+    assert restored["phase"] == phase and restored["last_metrics"] == {}
+
+
+def test_early_stopping_checkpoint_rejects_missing_selection_metric(
+    tmp_path: Path,
+) -> None:
+    matrix = _matrix()
+    state = training_callback(dtrain=matrix, patience=2, maximize=False, interval=0)
+    xgboost.train(
+        {"objective": "binary:logistic", "nthread": 1},
+        matrix,
+        num_boost_round=2,
+        evals=[(matrix, "train"), (matrix, "validation")],
+        callbacks=[state],
+        verbose_eval=False,
+    )
+    identity = {**_identity(), "input_roles": ["train", "validation"]}
+    write_checkpoint(
+        tmp_path, full_model=state.full_model, state=state, identity=identity
+    )
+    path = tmp_path / "recovery_state.json"
+    saved = json.loads(path.read_text())
+    saved["last_metrics"] = {}
+    path.write_text(json.dumps(saved))
+    with pytest.raises(AlgorithmExecutionError, match="checkpoint is invalid") as error:
+        read_checkpoint(
+            tmp_path, identity=identity, rounds=2, patience=2, maximize=False
+        )
+    assert "last selection score mismatch" in str(error.value.__cause__)
+
+
 @pytest.mark.parametrize(
     "field,value",
     [
@@ -243,7 +318,7 @@ def test_checkpoint_roundtrip_retains_full_and_final_model(
         ("completed_rounds", 1),
         ("scores", [0.5]),
         ("stopped", True),
-        ("last_metrics", {}),
+        ("last_metrics", None),
         ("last_metrics", {"train-logloss": float("nan")}),
         ("training_sha256", "corrupt"),
         ("selected_sha256", "corrupt"),
@@ -560,6 +635,12 @@ def test_collect_evidence_binds_result_to_the_final_batch(
     assert killed == [actor] and adapter.collector is None
 
 
+@pytest.mark.parametrize(
+    "checkpoint_files",
+    [False, True],
+    indirect=True,
+    ids=["default-metrics", "disabled-metrics"],
+)
 @pytest.mark.parametrize("phase", ["final", "training"])
 def test_recovery_export_requires_final_matching_state_and_filters_internal_metrics(
     checkpoint_files: Any, phase: str

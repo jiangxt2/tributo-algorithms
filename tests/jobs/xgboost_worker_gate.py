@@ -346,6 +346,8 @@ def _recovery_case(
 
     request, inputs = _request(root, train_path, validation_path, params, early=early)
     config = dict(request.algorithm_request.algorithm_config)
+    if params.get("disable_default_eval_metric") and "eval_metric" not in params:
+        config["model"] = dict(params)
     config["training"] = {
         "num_rounds": rounds,
         "checkpoint_interval_rounds": interval,
@@ -435,6 +437,14 @@ def _recovery_case(
         assert booster.num_boosted_rounds() == metrics["model_rounds"]
         sample = frame[["f0", "f1"]].iloc[::8192].to_numpy()
         predictions = booster.predict(xgboost.DMatrix(sample))
+    if params.get("disable_default_eval_metric") and "eval_metric" not in params:
+        assert not any(key.startswith(("train-", "validation-")) for key in metrics)
+        with BundleReader().open_artifact(ref, role="inference") as artifact:
+            session = onnxruntime.InferenceSession(
+                str(artifact.path_for("model.onnx")), providers=["CPUExecutionProvider"]
+            )
+            actual = session.run(None, {session.get_inputs()[0].name: sample})
+            np.testing.assert_allclose(actual[1][:, 1], predictions, atol=1e-6)
     assert REPORT_KEY not in metrics
     return {
         "metrics": metrics,
@@ -487,6 +497,33 @@ def _recovery_contract(
     np.testing.assert_allclose(
         fixed["predictions"], cases["fixed-baseline"]["predictions"], atol=1e-6
     )
+    for name, phase in (
+        ("no-metrics-baseline", None),
+        ("no-metrics-recovery", "training"),
+    ):
+        case = _recovery_case(
+            root / name,
+            train,
+            validation,
+            {**params, "disable_default_eval_metric": True},
+            frame,
+            phase=phase,
+            at_round=10,
+        )
+        assert (
+            case["metrics"]["training_rounds"] == case["metrics"]["model_rounds"] == 20
+        )
+        assert case["metrics"]["resumed_from_round"] == (10 if phase else 0)
+        assert case["metrics"]["attempt_training_rounds"] == (10 if phase else 20)
+        checkpoint = Path(case["events"]["commits"][-1]["checkpoint_path"])
+        assert (
+            json.loads((checkpoint / "recovery_state.json").read_text())["last_metrics"]
+            == {}
+        )
+        np.testing.assert_allclose(
+            case["predictions"], cases["fixed-baseline"]["predictions"], atol=1e-6
+        )
+        cases[name] = case
     cases["new-invocation"] = _recovery_case(
         root / "new-invocation", train, validation, params, frame, storage=storage
     )
@@ -598,6 +635,17 @@ def _recovery_contract(
 
 
 def main(root: Path) -> None:
+    import ray.train.xgboost as ray_xgboost
+
+    trainer_type = ray_xgboost.XGBoostTrainer
+
+    def cluster_trainer(**kwargs: Any) -> Any:
+        # This Gate requires two physical nodes, including after group restarts.
+        kwargs["scaling_config"] = replace(
+            kwargs["scaling_config"], placement_strategy="STRICT_SPREAD"
+        )
+        return trainer_type(**kwargs)
+
     root.mkdir(parents=True, exist_ok=False)
     rows = 131_075  # Uneven split; both shards exceed the 65,536-row batch bound.
     values = np.linspace(-2, 2, rows, dtype=np.float32)
@@ -658,6 +706,7 @@ def main(root: Path) -> None:
         worker_count=2,
     )
     ray.init(address="auto")
+    ray_xgboost.XGBoostTrainer = cluster_trainer
     try:
         identities = _identity_contract()
         result = build_algorithm_dispatcher().execute(
@@ -783,6 +832,7 @@ def main(root: Path) -> None:
         )
         print("RESULT: " + json.dumps(summary), flush=True)
     finally:
+        ray_xgboost.XGBoostTrainer = trainer_type
         ray.shutdown()
 
 

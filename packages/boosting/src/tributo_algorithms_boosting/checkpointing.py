@@ -152,17 +152,13 @@ def read_checkpoint(
         ):
             raise ValueError("unexpected selection configuration")
         last = state["last_metrics"]
-        if (
-            not isinstance(last, dict)
-            or not last
-            or any(
-                not isinstance(key, str)
-                or not key.startswith(("train-", "validation-"))
-                or not isinstance(value, (float, int))
-                or isinstance(value, bool)
-                or not math.isfinite(value)
-                for key, value in last.items()
-            )
+        if not isinstance(last, dict) or any(
+            not isinstance(key, str)
+            or not key.startswith(("train-", "validation-"))
+            or not isinstance(value, (float, int))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+            for key, value in last.items()
         ):
             raise ValueError("last metrics are invalid")
         if (

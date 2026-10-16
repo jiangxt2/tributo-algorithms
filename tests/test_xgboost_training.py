@@ -340,9 +340,11 @@ def test_worker_rejects_missing_or_empty_validation_without_success(
     assert list(tmp_path.iterdir()) == []
 
 
-@pytest.mark.parametrize("early", [False, True])
+@pytest.mark.parametrize(
+    "early,no_metrics", [(False, False), (True, False), (False, True)]
+)
 def test_worker_resumes_saved_progress_and_native_patience(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, early: bool
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, early: bool, no_metrics: bool
 ) -> None:
     import shutil
 
@@ -362,7 +364,15 @@ def test_worker_resumes_saved_progress_and_native_patience(
         invocation="same-fit",
         plan_id="frozen-plan",
     )
-    config["params"].update(min_child_weight=0, max_depth=1, eval_metric="logloss")
+    config["params"].update(
+        min_child_weight=0,
+        max_depth=1,
+        **(
+            {"disable_default_eval_metric": True}
+            if no_metrics
+            else {"eval_metric": "logloss"}
+        ),
+    )
     if early:
         config.update(early_stopping_rounds=4, maximize=False)
     monkeypatch.setattr(train, "get_checkpoint", lambda: None)
@@ -381,6 +391,11 @@ def test_worker_resumes_saved_progress_and_native_patience(
     with pytest.raises(Failure):
         algorithm._train_loop(config)
     assert not evidence
+    if no_metrics:
+        assert (
+            json.loads((saved / "recovery_state.json").read_text())["last_metrics"]
+            == {}
+        )
     reports: list[dict[str, Any]] = []
 
     def capture(metrics: Any, *, checkpoint: Any = None) -> None:
@@ -397,6 +412,8 @@ def test_worker_resumes_saved_progress_and_native_patience(
     algorithm._train_loop(config)
     assert len(reports) == 1 and not evidence
     metrics = reports[0]["metrics"]
+    if no_metrics:
+        assert not any(key.startswith(("train-", "validation-")) for key in metrics)
     start = 3 if early else 10
     assert metrics["resumed_from_round"] == start
     expected_rounds = 5 if early else 20
