@@ -11,7 +11,13 @@ def _validate_training_options(
     training: Mapping[str, Any], model: Mapping[str, Any]
 ) -> tuple[int, int | None, bool | None]:
     if unknown := sorted(
-        set(training) - {"num_rounds", "early_stopping_rounds", "maximize"}
+        set(training)
+        - {
+            "num_rounds",
+            "early_stopping_rounds",
+            "maximize",
+            "checkpoint_interval_rounds",
+        }
     ):
         raise ValueError(f"unknown XGBoost training keys: {unknown}")
     rounds = training.get("num_rounds", 10)
@@ -33,6 +39,24 @@ def _validate_training_options(
     if model.get("booster", "gbtree") == "gblinear":
         raise ValueError("early stopping best-model export requires a tree Booster")
     return rounds, patience, maximize
+
+
+def _validate_recovery_options(
+    training: Mapping[str, Any], ray_config: Mapping[str, Any], model: Mapping[str, Any]
+) -> tuple[int, int]:
+    interval = training.get("checkpoint_interval_rounds", 0)
+    failures = ray_config.get("max_failures", 0)
+    for name, value in (
+        ("checkpoint_interval_rounds", interval),
+        ("max_failures", failures),
+    ):
+        if type(value) is not int or value < 0:
+            raise ValueError(f"XGBoost {name} must be a non-negative integer")
+    if failures and not interval:
+        raise ValueError("XGBoost max_failures requires checkpoint_interval_rounds")
+    if interval and model.get("booster", "gbtree") != "gbtree":
+        raise ValueError("XGBoost checkpoint recovery requires gbtree")
+    return interval, failures
 
 
 def _validate_training_metadata(value: object) -> dict[str, Any]:
@@ -93,6 +117,9 @@ class XGBoostConfigValidator:
         if not isinstance(ray, Mapping) or not ray.get("storage_path"):
             raise ValueError("ray.storage_path is required")
         _validate_training_options(value.get("training", {}), value.get("model", {}))
+        _validate_recovery_options(
+            value.get("training", {}), ray, value.get("model", {})
+        )
         return dict(value)
 
 
@@ -170,6 +197,17 @@ class XGBoostOutputValidator:
                     **{key: metrics[key] for key in fields if key in metrics},
                 }
             )
+        if {"resumed_from_round", "attempt_training_rounds"} & set(metrics):
+            resumed = metrics.get("resumed_from_round")
+            attempt = metrics.get("attempt_training_rounds")
+            if (
+                type(resumed) is not int
+                or resumed < 0
+                or type(attempt) is not int
+                or attempt < 0
+                or resumed + attempt != metrics.get("training_rounds")
+            ):
+                raise ValueError("XGBoost recovery round counts are inconsistent")
         return value
 
 

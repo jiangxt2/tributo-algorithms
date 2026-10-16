@@ -132,8 +132,51 @@ not depend on a consumer supplying an iteration range at prediction time.
 For H&M, use validation logloss for stopping. XGBoost's distributed AUC is an
 [approximation](https://xgboost.readthedocs.io/en/stable/parameter.html#learning-task-parameters).
 Compute AP, ROC-AUC, and Lift over the complete held-out predictions and labels
-in the calling application. Periodic checkpoints and same-run recovery are
-tracked separately in issue #8; this change retains the resume rejection.
+in the calling application.
+
+## XGBoost periodic checkpoints and same-run recovery
+
+Enable periodic saving and a finite Worker failure allowance in the existing
+configuration:
+
+```json
+{
+  "training": {"num_rounds": 20, "checkpoint_interval_rounds": 10},
+  "ray": {"storage_path": "/shared/checkpoints", "max_failures": 1}
+}
+```
+
+Both fields default to zero. Values must be non-negative integers; booleans
+and infinite retry budgets are rejected. A positive `max_failures` requires
+a positive checkpoint interval. Saving without retries is allowed. Ray Train
+V2 owns checkpoint transport and Worker group restarts; every trainer invocation
+has a unique storage name. All nodes must access the same durable storage path.
+Recovery requires `gbtree`, fixed Worker count/environment, and frozen inputs.
+The exercised baseline is Ray 2.59.0 with XGBoost 3.4.1 and Core 1.2.0.
+
+`num_rounds` remains the total target: restoring round 10 with a target of 20
+adds at most 10 rounds. Checkpoints retain the full training Booster, ordered
+features, invocation/plan identity, environment versions, file digests, and
+early-stopping score history. Native early stopping replays that history to
+retain best score and patience progress. A checkpoint that has reached the
+round limit or stopped early adds no further rounds. Corrupt or incompatible
+state fails explicitly, without silently restarting from zero. A failure before
+the first checkpoint may restart from zero within the configured allowance.
+
+The latest recovery state and selected inference model are separate. Only a
+final checkpoint can be exported; both Bundle formats contain the selected
+model. Metrics include `resumed_from_round` and `attempt_training_rounds`, whose
+sum equals `training_rounds`. Final Worker receipts contain only the successful
+group's input counts and newly executed rounds, including zero for terminal
+recovery. Failed attempts do not contribute to coverage evidence.
+
+This supports Worker process failures within one `fit()`. Cross-run
+`runtime.resume_from`, Driver/Controller or cluster disaster recovery, elastic
+Worker counts, and Tune are outside this feature. The public stage-runner API
+is unchanged and keeps recovery disabled. Input identity checks do not detect
+changed contents behind the same mutable URI. UBJ continuation does not promise
+bitwise equivalence for random sampling, GPU training, or changed data shards;
+the Gate uses deterministic CPU histogram training without sampling.
 
 ## XGBoost Worker Gate
 
@@ -157,6 +200,11 @@ train rows, 131,077 validation rows, synchronized model digests, train-only
 and validation fits, early stopping, selected-model reload, and ONNX/native
 Bundle artifacts. A separate bounded routing fixture verifies row identities
 for both input roles, and an empty validation case must fail without publishing
-a Bundle. It preserves `result.json` and model outputs
+a Bundle. Recovery cases inject real Worker exits after the controller confirms
+checkpoint persistence: 10-to-20-round continuation, interruption during
+patience, further improvement up to the round cap, final-checkpoint recovery
+with no new rounds, finite retry exhaustion, and invocation/checkpoint isolation.
+Final receipts are matched to the last successful group. It preserves
+`result.json`, failure events, receipts, and model outputs
 under that directory. This targeted Gate does not certify other runtime images
 or execution profiles.
