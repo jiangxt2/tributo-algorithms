@@ -342,15 +342,20 @@ descriptor, and checks that discovery does not import the selected heavy
 implementation frameworks. Preserve this test's subprocess and
 count/ownership assertions when changing package composition.
 
-This repository does not contain the real multi-node Ray Jobs Gate. A unit
-test, local execution, single-process Torch check, descriptor-only conformance,
-or successful Wheel build cannot certify cross-node training. For changes to
-distributed semantics, framework communication, sharding, checkpointing,
-Bundle loading, or declared support profiles, run the corresponding real Gate
-from Tributo using its `AGENTS.md` procedure. That Gate must use fixed Wheels,
-Ray Jobs, the declared Image Profile, deterministic data/configuration, and
-traceable logs/receipts; do not use Ray Client as a substitute for a Ray Data
-cluster test.
+The repository's normal CI runs the algorithm unit, mathematics, contract,
+exporter, flavor, and installed-package conformance tests, including the
+XGBoost package tests. Tributo Core CI validates only framework contracts with
+Core-owned fixture plugins; it does not build or install the official
+`tributo-algorithms` distribution. There is currently no real multi-node
+Ray Jobs Gate for the aggregate algorithm Wheel in either repository.
+
+Unit tests, local execution, single-process Torch checks, descriptor-only
+conformance, and successful Wheel builds do not certify cross-node training.
+Do not describe an execution profile as multi-node validated or supported
+without evidence from a real fixed-Wheel Ray Jobs run. A future real Gate needs
+an explicitly approved owner and implementation plan; it must not make Core CI
+depend on the algorithm distribution. Do not use Ray Client as a substitute
+for a Ray Data cluster test.
 
 For every algorithm-level change, test the mathematical contract and its
 failure boundaries, including as applicable:
