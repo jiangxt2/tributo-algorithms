@@ -1,0 +1,41 @@
+name: Bug report
+description: Report a reproducible problem with an algorithm package
+title: "[bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a problem with Tributo Algorithms.
+        Remove credentials and sensitive data from logs and examples.
+
+  - type: textarea
+    attributes:
+      label: Affected algorithm or package
+      description: Identify the algorithm entry point or package involved.
+      placeholder: For example, xgboost.framework_native or x_learner.framework_native.
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and what you expected instead.
+      placeholder: Include relevant error messages and logs.
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest script, configuration, or command sequence that reproduces the problem.
+      placeholder: Include any required input shape or fixture details.
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Environment and versions
+      description: Include the relevant algorithm-library, Tributo Core, Python, Ray, and optional dependency versions, plus the operating system.
+      placeholder: List versions and environment details needed to reproduce the problem.
+    validations:
+      required: true
