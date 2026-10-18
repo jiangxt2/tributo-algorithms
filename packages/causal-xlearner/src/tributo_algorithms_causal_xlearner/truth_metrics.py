@@ -52,7 +52,15 @@ def _identity_vector(values: object, *, name: str) -> list[str | int]:
 
 def _finite_vector(values: object, *, name: str) -> np.ndarray:
     try:
-        result = np.asarray(values, dtype=np.float64)
+        raw = np.asarray(values)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(f"{name} must contain finite numeric values") from error
+    if np.iscomplexobj(raw) or (
+        raw.dtype == object and any(np.iscomplexobj(value) for value in raw.flat)
+    ):
+        raise ValueError(f"{name} must contain real numeric values")
+    try:
+        result = np.asarray(raw, dtype=np.float64)
     except (TypeError, ValueError, OverflowError) as error:
         raise ValueError(f"{name} must contain finite numeric values") from error
     if result.ndim != 1:

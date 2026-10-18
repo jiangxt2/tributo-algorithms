@@ -49,6 +49,19 @@ def test_truth_metrics_are_invariant_to_row_order() -> None:
     assert reverse["sample_count"] == forward["sample_count"]
 
 
+def test_truth_metrics_distinguish_root_pehe_from_cohort_ate_error() -> None:
+    result = evaluate_cate_predictions(
+        prediction_ids=["sample-a", "sample-b", "sample-c"],
+        cate_predictions=[2.0, 0.0, 3.0],
+        truth_ids=["sample-c", "sample-a", "sample-b"],
+        mu0=[0.0, 0.0, 0.0],
+        mu1=[1.0, 1.0, 1.0],
+    )
+
+    assert result["sqrt_PEHE"] == pytest.approx(np.sqrt(2.0))
+    assert result["ATE_error"] == pytest.approx(2.0 / 3.0)
+
+
 @pytest.mark.parametrize(
     ("prediction_ids", "truth_ids", "message"),
     [
@@ -108,6 +121,29 @@ def test_truth_metrics_reject_invalid_values_and_lengths(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         evaluate_cate_predictions(prediction_ids, cate, truth_ids, mu0, mu1)
+
+
+@pytest.mark.parametrize(
+    ("cate", "mu0", "mu1"),
+    [
+        (np.asarray([1.0 + 1.0j, complex(2.0, np.nan)]), [0.0, 0.0], [1.0, 1.0]),
+        ([0.0, 1.0], np.asarray([1.0 + 1.0j, complex(2.0, np.nan)]), [1.0, 1.0]),
+        ([0.0, 1.0], [0.0, 0.0], np.asarray([1.0 + 1.0j, complex(2.0, np.nan)])),
+    ],
+)
+def test_truth_metrics_reject_complex_prediction_and_truth_values(
+    cate: list[float] | np.ndarray,
+    mu0: list[float] | np.ndarray,
+    mu1: list[float] | np.ndarray,
+) -> None:
+    with pytest.raises(ValueError, match="real numeric values"):
+        evaluate_cate_predictions(
+            prediction_ids=[1, 2],
+            cate_predictions=cate,
+            truth_ids=[1, 2],
+            mu0=mu0,
+            mu1=mu1,
+        )
 
 
 def test_truth_metrics_reject_empty_and_non_vector_inputs() -> None:
