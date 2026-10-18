@@ -292,6 +292,7 @@ def test_xlearner_single_node_smoke_profile_matches_the_lock() -> None:
 
 def test_xlearner_single_node_smoke_covers_batch_effect_evaluation() -> None:
     ci = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    readme = (_ROOT / "README.md").read_text(encoding="utf-8")
     dockerfile = (
         _ROOT / "tests" / "jobs" / "Dockerfile.xlearner-single-node-smoke"
     ).read_text(encoding="utf-8")
@@ -318,6 +319,11 @@ def test_xlearner_single_node_smoke_covers_batch_effect_evaluation() -> None:
     assert "trap 'exit 143' TERM" in runner
     assert 'docker_cli container rm --force "$CONTAINER_NAME"' in runner
     assert 'docker_cli image rm "$IMAGE_TAG"' in runner
+    assert "/tmp/ray/session_latest/logs" in runner
+    assert "ray-session-logs-copy.log" in runner
+    assert runner.index("/tmp/ray/session_latest/logs") < runner.index(
+        'docker_cli container rm --force "$CONTAINER_NAME"'
+    )
     assert "dangling-images-before.log" in runner
     assert "docker-system-df-before.log" in runner
     assert "docker_cli system df" in runner
@@ -335,6 +341,9 @@ def test_xlearner_single_node_smoke_covers_batch_effect_evaluation() -> None:
     assert '"sample_id", "treatment", "outcome"' in payload
     assert "fit metrics do not cover all training rows" in payload
     assert '"fit_metrics": result["fit_metrics"]' in payload
+    assert "uv build --no-sources" in readme
+    assert "uv export" in readme
+    assert "--extra causal-xlearner" in readme
 
 
 def test_source_free_verifier_exercises_scalar_binding_contract() -> None:

@@ -245,6 +245,16 @@ The dataset source is the [ACIC 2016 competition page](https://jenniferhill7.wix
 With the pinned Docker/Ray profile available, run the manual Gate as follows:
 
 ```bash
+uv lock --check
+uv build --no-sources
+uv export \
+  --locked \
+  --extra causal-xlearner \
+  --no-dev \
+  --no-emit-project \
+  --no-annotate \
+  --output-file dist/xlearner-smoke-requirements.txt
+
 XLEARNER_ACIC_DATA_FILE=/path/to/acic-setting-replication.parquet \
 XLEARNER_ACIC_DATA_SHA256="replace-with-prepared-file-sha256" \
 XLEARNER_ACIC_SETTING_ID=1 \

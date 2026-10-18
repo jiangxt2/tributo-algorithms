@@ -40,6 +40,9 @@ cleanup() {
     )"
     if [[ "$container_run_token" == "$RUN_TOKEN" ]]; then
       docker_cli logs "$CONTAINER_NAME" >"$LOG_DIR/container.log" 2>&1
+      docker_cli cp "$CONTAINER_NAME:/tmp/ray/session_latest/logs" \
+        "$LOG_DIR/ray-session-logs" \
+        >"$LOG_DIR/ray-session-logs-copy.log" 2>&1
       docker_cli container rm --force "$CONTAINER_NAME" >/dev/null 2>&1
     else
       echo "Preserving container whose run label does not match this invocation." \
