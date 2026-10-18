@@ -46,7 +46,7 @@ This repository owns algorithm-domain behavior:
 The current source baseline contains 15 domain source packages, one root
 distribution, 37 `tributo.algorithms` entry points, 9 exporters, 1 validator,
 and 3 model flavors. The aggregate distribution currently declares version
-`0.1.0`; the root lock resolves Tributo `1.1.0` and Ray `2.55.1`. These facts
+`0.1.0`; the root lock resolves Tributo `1.2.0` and Ray `2.59.0`. These facts
 describe the checked-in baseline, not a permanent support guarantee. An
 algorithm being present, buildable, or discoverable does not by itself mean
 that it is `tested`, `validated`, or `supported` in Tributo's support model.
@@ -275,7 +275,7 @@ The repository is one uv project built with Hatchling. `packages/*` contains
 source domains, while the root `pyproject.toml` owns distribution metadata,
 entry points, optional dependency extras, and development configuration. It
 targets Python `>=3.12,<3.14` and depends on the published Tributo range
-`>=1.1`; it does not use a local Tributo source override.
+`>=1.2`; it does not use a local Tributo source override.
 
 The graph-pyg and all extras constrain Torch to `>=2.5,<2.14` while PyG's
 module imports still call TorchScript APIs deprecated in Torch 2.14. Custom
@@ -346,16 +346,21 @@ The repository's normal CI runs the algorithm unit, mathematics, contract,
 exporter, flavor, and installed-package conformance tests, including the
 XGBoost package tests. Tributo Core CI validates only framework contracts with
 Core-owned fixture plugins; it does not build or install the official
-`tributo-algorithms` distribution. There is currently no real multi-node
-Ray Jobs Gate for the aggregate algorithm Wheel in either repository.
+`tributo-algorithms` distribution. The repository contains a manual
+XGBoost Gate harness targeting a two-node Docker Ray 2.59.0 cluster with
+Tributo Core 1.2.0 (`README.md`,
+`tests/jobs/xgboost_worker_gate.py`). Standard PR CI does not run that
+Gate, and no successful current aggregate-Wheel multi-node result is recorded.
+The single-node PR smoke validates the end-to-end path but does not establish
+cross-node support.
 
 Unit tests, local execution, single-process Torch checks, descriptor-only
 conformance, and successful Wheel builds do not certify cross-node training.
 Do not describe an execution profile as multi-node validated or supported
-without evidence from a real fixed-Wheel Ray Jobs run. A future real Gate needs
-an explicitly approved owner and implementation plan; it must not make Core CI
-depend on the algorithm distribution. Do not use Ray Client as a substitute
-for a Ray Data cluster test.
+without evidence from a real fixed-Wheel Ray Jobs run. A Gate harness alone is
+not validation evidence. Keep algorithm-library Gates independent of Core CI;
+do not make Core CI depend on the algorithm distribution. Do not use Ray Client
+as a substitute for a Ray Data cluster test.
 
 For every algorithm-level change, test the mathematical contract and its
 failure boundaries, including as applicable:

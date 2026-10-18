@@ -184,6 +184,12 @@ XGBoost consumes replayable Ray Train shards in batches of at most 65,536 rows.
 The existing Core Framework Native and multi-stage entry points share this
 Worker loop; Core continues to manage execution and Bundle delivery.
 
+PR CI also runs a small single-node Ray Jobs smoke for the installed aggregate
+Wheel. Its pinned Python/Core/Ray profile is recorded in
+`tests/jobs/xgboost-single-node-smoke.env`. The smoke checks the
+end-to-end training and Bundle inference path; it does not validate cross-node
+execution. The manual Gate below remains the cross-node validation harness.
+
 The Gate targets a two-node Docker Ray 2.59.0 cluster with the same fixed
 Tributo Core 1.2.0 and algorithm Wheels installed on every node, together with the
 `boosting` extra. Use a shared directory mounted at the same absolute path on

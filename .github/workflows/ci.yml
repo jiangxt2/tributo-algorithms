@@ -47,3 +47,39 @@ jobs:
               causal-dr causal-xlearner classical graph-pyg multistage-torch recsys-torch \
               representation tabular-torch timeseries transformers-nlp \
             --require-scalar-single-column-binding
+
+  xgboost-single-node-smoke:
+    name: XGBoost single-node Ray Jobs smoke
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.23"
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the aggregate Wheel and export its locked runtime
+        run: |
+          uv lock --check
+          uv build --no-sources
+          uv export \
+            --locked \
+            --extra boosting \
+            --no-dev \
+            --no-emit-project \
+            --no-annotate \
+            --output-file dist/xgboost-smoke-requirements.txt
+      - name: Run the installed Wheel through a single-node Ray Jobs cluster
+        run: bash tests/jobs/run_xgboost_single_node_smoke.sh
+      - name: Preserve XGBoost smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xgboost-single-node-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/tributo-xgboost-single-node-smoke-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: ignore
+          retention-days: 14
