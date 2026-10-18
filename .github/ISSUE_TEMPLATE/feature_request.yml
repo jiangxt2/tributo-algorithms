@@ -1,0 +1,32 @@
+name: Feature request
+description: Suggest a capability for Tributo Algorithms
+title: "[feature] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking the time to propose a feature for Tributo Algorithms.
+
+  - type: textarea
+    attributes:
+      label: Description
+      description: Briefly describe the capability you would like to see.
+      placeholder: What should the algorithm library support?
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Use case
+      description: Describe the problem you are trying to solve and who needs this capability.
+      placeholder: Focus on the outcome you need rather than a specific implementation.
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Relevant algorithm or package
+      description: Name a related algorithm or package, if known.
+      placeholder: Leave blank if this is a library-wide capability.
+    validations:
+      required: false
