@@ -12,6 +12,14 @@ _LAZY_EXPORTS = {
         "DistributedXLearner",
     ),
     "XLearnerModel": ("tributo_algorithms_causal_xlearner.model", "XLearnerModel"),
+    "evaluate_cate_predictions": (
+        "tributo_algorithms_causal_xlearner.truth_metrics",
+        "evaluate_cate_predictions",
+    ),
+    "CATEEvaluationResult": (
+        "tributo_algorithms_causal_xlearner.truth_metrics",
+        "CATEEvaluationResult",
+    ),
 }
 
 
@@ -26,4 +34,10 @@ def __getattr__(name: str) -> Any:
     return value
 
 
-__all__ = ["DistributedXLearner", "XLearnerModel", "X_LEARNER_DESCRIPTOR"]
+__all__ = [
+    "DistributedXLearner",
+    "XLearnerModel",
+    "X_LEARNER_DESCRIPTOR",
+    "CATEEvaluationResult",
+    "evaluate_cate_predictions",
+]
