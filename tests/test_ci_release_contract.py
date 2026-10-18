@@ -198,6 +198,68 @@ def test_ci_and_release_workflows_cover_single_artifact_flow() -> None:
     assert "id-token: write" in release
 
 
+def test_xgboost_single_node_smoke_profile_matches_the_lock() -> None:
+    profile_path = _ROOT / "tests" / "jobs" / "xgboost-single-node-smoke.env"
+    profile = {
+        key: value
+        for line in profile_path.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+        for key, value in [line.split("=", 1)]
+    }
+    locked_packages = tomllib.loads((_ROOT / "uv.lock").read_text())["package"]
+    locked_versions = {
+        name: next(
+            package["version"] for package in locked_packages if package["name"] == name
+        )
+        for name in ("ray", "tributo")
+    }
+
+    assert profile["PYTHON_VERSION"] == "3.12"
+    assert profile["TRIBUTO_CORE_VERSION"] == locked_versions["tributo"] == "1.2.0"
+    assert profile["RAY_VERSION"] == locked_versions["ray"] == "2.59.0"
+    assert profile["RAY_IMAGE"].startswith("rayproject/ray:2.59.0-py312@sha256:")
+    image_digest = profile["RAY_IMAGE"].split("@sha256:", maxsplit=1)[1]
+    assert len(image_digest) == 64
+    assert all(character in "0123456789abcdef" for character in image_digest)
+
+
+def test_xgboost_single_node_smoke_is_a_separate_ci_tier() -> None:
+    ci = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    dockerfile = (
+        _ROOT / "tests" / "jobs" / "Dockerfile.xgboost-single-node-smoke"
+    ).read_text(encoding="utf-8")
+    runner = (_ROOT / "tests" / "jobs" / "run_xgboost_single_node_smoke.sh").read_text(
+        encoding="utf-8"
+    )
+    payload = (_ROOT / "tests" / "jobs" / "xgboost_single_node_smoke.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "xgboost-single-node-smoke:" in ci
+    assert "needs: validate" in ci
+    assert 'python-version: "3.12"' in ci
+    assert "uv export" in ci
+    assert "Dockerfile.xgboost-single-node-smoke" in runner
+    assert 'source "$ROOT_DIR/tests/jobs/xgboost-single-node-smoke.env"' in runner
+    assert '--build-arg "RAY_IMAGE=$RAY_IMAGE"' in runner
+    assert "ARG RAY_IMAGE" in dockerfile and "FROM " in dockerfile
+    assert "--require-hashes" in dockerfile
+    assert "ray job submit" in runner
+    assert "trap cleanup EXIT" in runner
+    assert "trap 'exit 130' INT" in runner
+    assert "trap 'exit 143' TERM" in runner
+    assert "--expected-tributo-version" in runner
+    assert "--expected-ray-version" in runner
+    assert "--expected-ray-image" in runner
+    assert "RUNTIME VERSIONS:" in payload
+    assert "ReadOptions(target_parallelism=4)" in payload
+    assert 'ray.init(address="auto")' in payload
+    assert "len({worker.node_id for worker in receipt.workers}) == 1" in payload
+    assert '"ray_image": args.expected_ray_image' in payload
+    assert "native_onnx_prediction_parity" in payload
+    assert "xgboost_worker_gate.py" not in ci
+
+
 def test_source_free_verifier_exercises_scalar_binding_contract() -> None:
     verifier = _verifier_module()
 

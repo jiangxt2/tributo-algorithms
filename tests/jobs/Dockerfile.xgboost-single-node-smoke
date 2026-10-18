@@ -1,0 +1,24 @@
+ARG RAY_IMAGE
+FROM ${RAY_IMAGE}
+
+USER root
+
+ENV VIRTUAL_ENV=/opt/tributo/.venv \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+
+RUN python -m venv "${VIRTUAL_ENV}"
+
+WORKDIR /opt/tributo-smoke
+
+COPY dist/xgboost-smoke-requirements.txt /tmp/xgboost-smoke-requirements.txt
+COPY dist/tributo_algorithms-*.whl /tmp/
+
+RUN python -m pip install --require-hashes -r /tmp/xgboost-smoke-requirements.txt && \
+    python -m pip install --no-deps /tmp/tributo_algorithms-*.whl && \
+    python -m pip check
+
+COPY tests/jobs/xgboost_single_node_smoke.py /opt/tributo-smoke/
+
+USER ray
