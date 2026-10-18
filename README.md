@@ -214,3 +214,61 @@ Final receipts are matched to the last successful group. It preserves
 `result.json`, failure events, receipts, and model outputs
 under that directory. This targeted Gate does not certify other runtime images
 or execution profiles.
+
+## X-Learner held-out effect evaluation
+
+PR CI runs the installed aggregate Wheel through a single-node Ray Jobs smoke
+using a deterministic truth-known fixture. The smoke exercises X-Learner fit,
+loads its Bundle through the batch prediction capability, and reports
+unnormalized root PEHE and absolute population ATE error on a held-out cohort.
+
+The manual ACIC 2016 Gate uses a prepared CSV or Parquet file that is not
+committed to the repository. It must contain unique `sample_id`, binary
+`treatment`, factual `outcome`, expected potential-outcome means `mu0` and
+`mu1`, and at least three numeric feature columns named contiguously `x0`,
+`x1`, ... . The file must not contain extra columns: unmapped fields are
+rejected so potential-outcome truth cannot accidentally become a feature.
+Categorical covariates must be encoded numerically before preparation. The
+result's `schema_mapping` records the canonical columns in the prepared file;
+it does not infer the original ACIC column names or categorical encoding. Keep
+those preparation details with the local dataset provenance. The Gate verifies
+the checksum of the exact prepared file, separates training rows from held-out
+rows with the recorded seed, and excludes `mu0` and `mu1` from training input.
+
+For a manual run, use one fixed ACIC setting and replication, then record the
+source, setting, replication, schema mapping, split seed, and prepared-file
+SHA-256 in the result. The reported metrics are project-local unnormalized
+root PEHE in outcome units and population ATE error over the held-out cohort;
+they do not reproduce the ACIC competition's normalized PEHE or SATT scoring.
+The dataset source is the [ACIC 2016 competition page](https://jenniferhill7.wixsite.com/acic-2016/competition).
+
+With the pinned Docker/Ray profile available, run the manual Gate as follows:
+
+```bash
+uv lock --check
+uv build --no-sources
+uv export \
+  --locked \
+  --extra causal-xlearner \
+  --no-dev \
+  --no-emit-project \
+  --no-annotate \
+  --output-file dist/xlearner-smoke-requirements.txt
+
+XLEARNER_ACIC_DATA_FILE=/path/to/acic-setting-replication.parquet \
+XLEARNER_ACIC_DATA_SHA256="replace-with-prepared-file-sha256" \
+XLEARNER_ACIC_SETTING_ID=1 \
+XLEARNER_ACIC_REPLICATION=1 \
+XLEARNER_ACIC_SPLIT_SEED=7 \
+bash tests/jobs/run_xlearner_single_node_smoke.sh
+```
+
+The Gate uses Tributo Core 1.2.0, Ray 2.59.0, Python 3.12, and the
+digest-pinned Ray image in `tests/jobs/xlearner-single-node-smoke.env`. It
+records the runtime, dataset checksum, Bundle identity, metrics, and logs, then
+removes only its own container and custom image. The result validates a
+single-node path and does not claim online-serving or multi-node support.
+For a local manual run, pull the pinned base image through the configured
+registry mirror, tag it with the value of `RAY_LOCAL_TAG` in the profile, and
+ensure its repository digest matches the profile. The runner verifies the
+digest and does not pull the base image from the default registry.

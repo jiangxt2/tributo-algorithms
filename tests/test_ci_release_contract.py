@@ -260,6 +260,92 @@ def test_xgboost_single_node_smoke_is_a_separate_ci_tier() -> None:
     assert "xgboost_worker_gate.py" not in ci
 
 
+def test_xlearner_single_node_smoke_profile_matches_the_lock() -> None:
+    profile_path = _ROOT / "tests" / "jobs" / "xlearner-single-node-smoke.env"
+    profile = {
+        key: value
+        for line in profile_path.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+        for key, value in [line.split("=", 1)]
+    }
+    locked_packages = tomllib.loads((_ROOT / "uv.lock").read_text())["package"]
+    locked_versions = {
+        name: next(
+            package["version"] for package in locked_packages if package["name"] == name
+        )
+        for name in ("ray", "tributo")
+    }
+    xgboost_profile_path = _ROOT / "tests" / "jobs" / "xgboost-single-node-smoke.env"
+    xgboost_profile = {
+        key: value
+        for line in xgboost_profile_path.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+        for key, value in [line.split("=", 1)]
+    }
+
+    assert profile["PYTHON_VERSION"] == "3.12"
+    assert profile["TRIBUTO_CORE_VERSION"] == locked_versions["tributo"] == "1.2.0"
+    assert profile["RAY_VERSION"] == locked_versions["ray"] == "2.59.0"
+    assert profile["RAY_IMAGE"] == xgboost_profile["RAY_IMAGE"]
+    assert profile["RAY_LOCAL_TAG"] == "rayproject/ray:2.59.0-py312"
+
+
+def test_xlearner_single_node_smoke_covers_batch_effect_evaluation() -> None:
+    ci = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    readme = (_ROOT / "README.md").read_text(encoding="utf-8")
+    dockerfile = (
+        _ROOT / "tests" / "jobs" / "Dockerfile.xlearner-single-node-smoke"
+    ).read_text(encoding="utf-8")
+    runner = (_ROOT / "tests" / "jobs" / "run_xlearner_single_node_smoke.sh").read_text(
+        encoding="utf-8"
+    )
+    payload = (_ROOT / "tests" / "jobs" / "xlearner_single_node_smoke.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "xlearner-single-node-smoke:" in ci
+    assert ci.count("  xlearner-single-node-smoke:") == 1
+    assert "needs: validate" in ci
+    assert 'python-version: "3.12"' in ci
+    assert "--extra causal-xlearner" in ci
+    assert "Dockerfile.xlearner-single-node-smoke" in runner
+    assert 'source "$ROOT_DIR/tests/jobs/xlearner-single-node-smoke.env"' in runner
+    assert '--build-arg "RAY_IMAGE=$RAY_BUILD_IMAGE"' in runner
+    assert "ARG RAY_IMAGE" in dockerfile and "FROM " in dockerfile
+    assert "--require-hashes" in dockerfile
+    assert "ray job submit" in runner
+    assert "trap cleanup EXIT" in runner
+    assert "trap 'exit 130' INT" in runner
+    assert "trap 'exit 143' TERM" in runner
+    assert 'docker_cli container rm --force "$CONTAINER_NAME"' in runner
+    assert 'docker_cli image rm "$IMAGE_TAG"' in runner
+    assert "/tmp/ray/session_latest/logs" in runner
+    assert "ray-session-logs-copy.log" in runner
+    assert runner.index("/tmp/ray/session_latest/logs") < runner.index(
+        'docker_cli container rm --force "$CONTAINER_NAME"'
+    )
+    assert "dangling-images-before.log" in runner
+    assert "docker-system-df-before.log" in runner
+    assert "docker_cli system df" in runner
+    assert "RAY_REPO_DIGESTS" in runner
+    assert "EXPECTED_RAY_DIGEST" in runner
+    assert "docker system prune" not in runner
+    assert "BundleModelLoader" in payload
+    assert 'use_case="batch"' in payload
+    assert "evaluate_cate_predictions" in payload
+    assert "ray.nodes()" in payload
+    assert "ACIC_SOURCE_URL" in payload
+    assert "_file_sha256" in payload
+    assert "mu0" in payload and "mu1" in payload
+    assert "--acic-sha256" in runner
+    assert '"sample_id", "treatment", "outcome"' in payload
+    assert "fit metrics do not cover all training rows" in payload
+    assert '"fit_metrics": result["fit_metrics"]' in payload
+    assert "uv build --no-sources" in readme
+    assert "uv export" in readme
+    assert "--extra causal-xlearner" in readme
+
+
 def test_source_free_verifier_exercises_scalar_binding_contract() -> None:
     verifier = _verifier_module()
 
