@@ -7,6 +7,8 @@ from typing import Any, Mapping, cast
 
 import numpy as np
 
+from .contracts import _validate_propensity_clip, _validate_response_threshold
+
 STAGES = ("mu0", "mu1", "tau0", "tau1", "propensity")
 FORMULA = "cate=propensity*tau0+(1-propensity)*tau1"
 QUADRANT_CODES = {
@@ -48,8 +50,12 @@ class XLearnerModel:
             raise ValueError("X-Learner requires exactly five Booster stages")
         self.boosters = dict(boosters)
         self.feature_names = feature_names
-        self.response_threshold = response_threshold
-        self.propensity_clip = propensity_clip
+        self.response_threshold = _validate_response_threshold(
+            response_threshold, "response_threshold"
+        )
+        self.propensity_clip = _validate_propensity_clip(
+            propensity_clip, "propensity_clip"
+        )
 
     @classmethod
     def from_raw(
