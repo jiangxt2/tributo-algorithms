@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import numpy as np
+import pytest
 from packaging.specifiers import SpecifierSet
 from sklearn.ensemble import RandomForestClassifier
 from tributo.algorithms.input.tabular import InMemoryTabularInputView
@@ -19,6 +20,7 @@ from tributo_algorithms_classical import (
     RANDOM_FOREST_JOBLIB_DESCRIPTOR,
     RANDOM_FOREST_NATIVE_DESCRIPTOR,
 )
+from tributo_algorithms_classical.contracts import ClassicalConfigValidator
 from tributo_algorithms_classical.linear_regression import (
     DistributedLinearRegression,
 )
@@ -71,6 +73,32 @@ def test_official_descriptors_use_public_v2_contracts() -> None:
         assert descriptor.registration.contract_bindings is not None
         assert descriptor.package_name == "tributo-algorithms"
         assert SpecifierSet(descriptor.tributo_version_spec) == SpecifierSet(">=1.1")
+
+
+@pytest.mark.parametrize(
+    ("config_key", "value"),
+    [
+        (config_key, value)
+        for config_key in ("C", "learning_rate", "tolerance")
+        for value in (np.nan, np.inf, -np.inf)
+    ],
+)
+def test_classical_config_rejects_non_finite_optimizer_values(
+    config_key: str,
+    value: float,
+) -> None:
+    with pytest.raises(ValueError, match=f"{config_key} must be finite"):
+        ClassicalConfigValidator().validate({config_key: value})
+
+
+def test_classical_config_accepts_finite_logistic_optimizer_values() -> None:
+    validated = ClassicalConfigValidator().validate(
+        {"C": 1.0, "learning_rate": 0.25, "tolerance": 1e-6}
+    )
+
+    assert validated["C"] == 1.0
+    assert validated["learning_rate"] == 0.25
+    assert validated["tolerance"] == 1e-6
 
 
 def test_random_forest_native_is_conditional_until_parity_gate() -> None:
@@ -211,6 +239,67 @@ def test_binary_logistic_hook_converges_without_ray_or_runtime_code() -> None:
     np.testing.assert_array_equal(predictions, labels)
     assert model.estimator.coef_.shape == (1, 2)
     assert int(model.estimator.n_iter_[0]) == 60
+
+
+@pytest.mark.parametrize("config_key", ("learning_rate", "tolerance"))
+@pytest.mark.parametrize("value", (np.nan, np.inf, -np.inf, 0.0, -1.0, True))
+def test_binary_logistic_state_rejects_invalid_optimizer_values(
+    config_key: str,
+    value: float | bool,
+) -> None:
+    with pytest.raises(
+        ValueError, match=f"{config_key} must be a positive finite value"
+    ):
+        BinaryL2LogisticRegression().initialize_state(
+            {"feature_count": 2, config_key: value}, object()
+        )
+
+
+@pytest.mark.parametrize("value", (np.nan, np.inf, -np.inf))
+def test_binary_logistic_rejects_non_finite_features_before_update(
+    value: float,
+) -> None:
+    columns = dict(_view().columns())
+    x0 = list(columns["x0"])
+    x0[0] = value
+    columns["x0"] = tuple(x0)
+    view = InMemoryTabularInputView(
+        _columns=columns,
+        feature_names=("x0", "x1"),
+        label_name="label",
+    )
+    algorithm = BinaryL2LogisticRegression()
+    state = algorithm.initialize_state({"feature_count": 2}, object())
+    context = AlgorithmExecutionContext(inputs={"train": view})
+
+    with pytest.raises(ValueError, match="Logistic Regression features must be finite"):
+        algorithm.compute_partition_update((view.columns(),), state, 0, context)
+
+
+@pytest.mark.parametrize(
+    "value", (1.0 + 0.5j, complex(1.0, np.nan), complex(1.0, np.inf))
+)
+def test_binary_logistic_rejects_complex_features_before_conversion(
+    value: complex,
+) -> None:
+    columns = dict(_view().columns())
+    x0 = list(columns["x0"])
+    x0[0] = value
+    columns["x0"] = tuple(x0)
+    view = SimpleNamespace(
+        feature_names=("x0", "x1"),
+        label_name="label",
+        row_count=len(x0),
+        columns=lambda: columns,
+    )
+    algorithm = BinaryL2LogisticRegression()
+    state = algorithm.initialize_state({"feature_count": 2}, object())
+    context = AlgorithmExecutionContext(inputs={"train": view})
+
+    with pytest.raises(
+        ValueError, match="Logistic Regression features must be real-valued"
+    ):
+        algorithm.compute_partition_update((view.columns(),), state, 0, context)
 
 
 def test_binary_logistic_matches_sklearn_l2_objective() -> None:
