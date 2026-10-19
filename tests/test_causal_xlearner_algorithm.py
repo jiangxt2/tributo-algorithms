@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import pytest
 from tributo.algorithms.api import AlgorithmExecutionError
+from tributo.exceptions import ModelLoadError
 from tributo.exporting.models import (
     ExportContext,
     ExportSource,
@@ -24,7 +27,10 @@ from tributo_algorithms_causal_xlearner.algorithm import (
 )
 from tributo_algorithms_causal_xlearner.contracts import XLearnerConfigValidator
 from tributo_algorithms_causal_xlearner.exporter import XLearnerONNXExporter
+from tributo_algorithms_causal_xlearner.flavor import XLearnerFlavor
 from tributo_algorithms_causal_xlearner.model import (
+    FORMULA,
+    QUADRANT_CODES,
     STAGE_OBJECTIVES,
     STAGES,
     XLearnerModel,
@@ -39,8 +45,8 @@ def test_xlearner_owns_stable_algorithm_spec_and_stages() -> None:
     assert distribution.policy.component_stages == STAGES
 
 
-def test_xlearner_config_contract_requires_five_stage_inputs() -> None:
-    value = {
+def _valid_xlearner_config() -> dict[str, Any]:
+    return {
         "data": {
             "feature_columns": ["x0", "x1"],
             "treatment_col": "treatment",
@@ -52,7 +58,153 @@ def test_xlearner_config_contract_requires_five_stage_inputs() -> None:
         "ray": {"storage_path": "/tmp/xlearner"},
         "output": {"bundle_uri": "/tmp/xlearner-bundle"},
     }
+
+
+def test_xlearner_config_contract_requires_five_stage_inputs() -> None:
+    value = _valid_xlearner_config()
+
     assert XLearnerConfigValidator().validate(value) == value
+
+
+@pytest.mark.parametrize(
+    "propensity_clip",
+    [
+        [],
+        [0.2],
+        [0.2, 0.8, 0.9],
+        "0.2,0.8",
+        [0.0, 0.8],
+        [0.2, 1.0],
+        [0.8, 0.2],
+        [0.5, 0.5],
+        [np.nan, 0.8],
+        [0.2, np.inf],
+        [True, 0.8],
+    ],
+)
+def test_xlearner_config_rejects_invalid_propensity_clip(
+    propensity_clip: object,
+) -> None:
+    value = _valid_xlearner_config()
+    value["training"]["propensity_clip"] = propensity_clip
+
+    with pytest.raises(ValueError, match="training.propensity_clip"):
+        XLearnerConfigValidator().validate(value)
+
+
+@pytest.mark.parametrize("response_threshold", [np.nan, np.inf, -np.inf, True, "0.5"])
+def test_xlearner_config_rejects_invalid_response_threshold(
+    response_threshold: object,
+) -> None:
+    value = _valid_xlearner_config()
+    value["training"]["response_threshold"] = response_threshold
+
+    with pytest.raises(ValueError, match="training.response_threshold"):
+        XLearnerConfigValidator().validate(value)
+
+
+@pytest.mark.parametrize("response_threshold", [-1.5, 1.5])
+def test_xlearner_config_accepts_finite_thresholds_outside_probability_range(
+    response_threshold: float,
+) -> None:
+    value = _valid_xlearner_config()
+    value["training"].update(
+        propensity_clip=[0.2, 0.8], response_threshold=response_threshold
+    )
+
+    assert XLearnerConfigValidator().validate(value) == value
+
+
+@pytest.mark.parametrize(
+    "propensity_clip",
+    [
+        (0.0, 0.8),
+        (0.2, 1.0),
+        (0.8, 0.2),
+        (0.5, 0.5),
+        (np.nan, 0.8),
+        (0.2, np.inf),
+        (True, 0.8),
+    ],
+)
+def test_xlearner_model_rejects_invalid_propensity_clip(
+    propensity_clip: tuple[float, float],
+) -> None:
+    with pytest.raises(ValueError, match="propensity_clip"):
+        XLearnerModel(
+            {stage: object() for stage in STAGES},
+            feature_names=("x0",),
+            response_threshold=0.5,
+            propensity_clip=propensity_clip,
+        )
+
+
+@pytest.mark.parametrize("response_threshold", [np.nan, np.inf, -np.inf, True])
+def test_xlearner_model_rejects_invalid_response_threshold(
+    response_threshold: float,
+) -> None:
+    with pytest.raises(ValueError, match="response_threshold"):
+        XLearnerModel(
+            {stage: object() for stage in STAGES},
+            feature_names=("x0",),
+            response_threshold=response_threshold,
+            propensity_clip=(0.2, 0.8),
+        )
+
+
+@pytest.mark.parametrize("response_threshold", [-1.5, 1.5])
+def test_xlearner_model_accepts_finite_thresholds_outside_probability_range(
+    response_threshold: float,
+) -> None:
+    model = XLearnerModel(
+        {stage: object() for stage in STAGES},
+        feature_names=("x0",),
+        response_threshold=response_threshold,
+        propensity_clip=(0.2, 0.8),
+    )
+
+    assert model.response_threshold == response_threshold
+    assert model.propensity_clip == (0.2, 0.8)
+
+
+def test_xlearner_flavor_rejects_boolean_response_threshold_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeBooster:
+        def load_model(self, path: str) -> None:
+            self.stage = Path(path).stem
+
+        def save_config(self) -> str:
+            return json.dumps(
+                {"learner": {"objective": {"name": STAGE_OBJECTIVES[self.stage]}}}
+            )
+
+    fake_xgboost = ModuleType("xgboost")
+    fake_xgboost.Booster = FakeBooster
+    monkeypatch.setitem(sys.modules, "xgboost", fake_xgboost)
+
+    metadata_path = tmp_path / "model.json"
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "api_version": 1,
+                "formula": FORMULA,
+                "quadrant_codes": QUADRANT_CODES,
+                "components": {stage: f"{stage}.ubj" for stage in STAGES},
+                "feature_names": ["x0"],
+                "response_threshold": True,
+                "propensity_clip": [0.2, 0.8],
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifact: Any = SimpleNamespace(
+        entrypoint_path=metadata_path,
+        path_for=lambda name: tmp_path / name,
+    )
+
+    with pytest.raises(ModelLoadError, match="artifact is invalid"):
+        XLearnerFlavor().load(artifact, role="prediction")
 
 
 def test_xlearner_onnx_exporter_uses_core_v2_and_runtime_validation() -> None:

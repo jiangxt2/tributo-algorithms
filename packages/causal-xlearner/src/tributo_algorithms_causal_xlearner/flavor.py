@@ -68,7 +68,7 @@ class XLearnerFlavor:
             model = XLearnerModel(
                 boosters,
                 feature_names=tuple(metadata["feature_names"]),
-                response_threshold=float(metadata["response_threshold"]),
+                response_threshold=metadata["response_threshold"],
                 propensity_clip=tuple(metadata["propensity_clip"]),
             )
         except Exception as exc:
