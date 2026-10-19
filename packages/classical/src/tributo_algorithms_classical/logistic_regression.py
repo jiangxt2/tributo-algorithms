@@ -56,17 +56,29 @@ class BinaryL2LogisticRegression(
         c_value = float(config.get("C", 1.0))
         if not np.isfinite(c_value) or c_value <= 0:
             raise ValueError("C must be a positive finite value")
+        learning_rate_value = config.get("learning_rate", 0.25)
+        if not isinstance(learning_rate_value, (int, float)) or isinstance(
+            learning_rate_value, bool
+        ):
+            raise ValueError("learning_rate must be a positive finite value")
+        learning_rate = float(learning_rate_value)
+        if not np.isfinite(learning_rate) or learning_rate <= 0:
+            raise ValueError("learning_rate must be a positive finite value")
+        tolerance_value = config.get("tolerance", 1e-6)
+        if not isinstance(tolerance_value, (int, float)) or isinstance(
+            tolerance_value, bool
+        ):
+            raise ValueError("tolerance must be a positive finite value")
+        tolerance = float(tolerance_value)
+        if not np.isfinite(tolerance) or tolerance <= 0:
+            raise ValueError("tolerance must be a positive finite value")
         return {
             "coef": np.zeros(feature_count, dtype=np.float64),
             "intercept": np.zeros(1, dtype=np.float64),
             "round": np.zeros(1, dtype=np.int64),
             "feature_count": np.asarray([feature_count], dtype=np.int64),
-            "learning_rate": np.asarray(
-                [float(config.get("learning_rate", 0.25))], dtype=np.float64
-            ),
-            "tolerance": np.asarray(
-                [float(config.get("tolerance", 1e-6))], dtype=np.float64
-            ),
+            "learning_rate": np.asarray([learning_rate], dtype=np.float64),
+            "tolerance": np.asarray([tolerance], dtype=np.float64),
             "regularization": np.asarray([1.0 / c_value], dtype=np.float64),
             "feature_names": feature_names,
         }
@@ -94,9 +106,14 @@ class BinaryL2LogisticRegression(
         loss_sum = 0.0
         rows = 0
         for batch in batches:
+            raw_features = [np.asarray(batch[name]) for name in feature_names]
+            if any(np.iscomplexobj(column) for column in raw_features):
+                raise ValueError("Logistic Regression features must be real-valued")
             features = np.column_stack(
-                [np.asarray(batch[name], dtype=np.float64) for name in feature_names]
+                [np.asarray(column, dtype=np.float64) for column in raw_features]
             )
+            if not np.isfinite(features).all():
+                raise ValueError("Logistic Regression features must be finite")
             labels = np.asarray(batch[label_name], dtype=np.float64)
             if not np.isin(labels, (0.0, 1.0)).all():
                 raise ValueError("binary Logistic Regression labels must be 0 or 1")
