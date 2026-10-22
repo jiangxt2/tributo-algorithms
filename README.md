@@ -46,9 +46,11 @@ the same range. PyG's module import uses TorchScript APIs deprecated in Torch
 
 ## Core compatibility
 
-The distribution, domain extras, and algorithm descriptors require Tributo Core
-`>=1.1` without an upper version bound. Versions below 1.1 are outside the
-declared compatibility range. An open upper bound does not certify future Core
+The distribution and domain extras require Tributo Core `>=1.2` without an
+upper version bound. The XGBoost descriptor also requires `>=1.2` for optional
+input routing; other descriptors retain their own minimum versions. Versions
+below 1.2 are outside this distribution's declared compatibility range.
+An open upper bound does not certify future Core
 releases; execution support is established by the Gate for its exact Core
 version, algorithm Wheel, and runtime image. Lock those versions in consuming
 projects for reproducible deployments.
@@ -84,3 +86,223 @@ Release the aggregate distribution with a single
 `tributo-algorithms-v<semver>` tag. CI builds one Wheel and source distribution,
 publishes the same checksummed files to TestPyPI, verifies the installed
 metadata, then publishes those files to PyPI.
+
+## XGBoost validation and early stopping
+
+XGBoost accepts a required `train` binding and an optional `validation` binding
+through `InputBindingSet`, with `train` as the primary role. Both inputs must
+declare the same ordered features and label column and provide compatible
+numeric schemas. Validation rows are evaluated separately and never enter the
+training gradient matrix. Both roles use lossless partitioning and report
+their own `input_rows` counts for Core validation.
+
+For validation-driven model selection, include these fields in the existing
+`algorithm_config` (alongside its `data`, `ray`, and `output` configuration):
+
+```json
+{
+  "model": {"objective": "binary:logistic", "eval_metric": "logloss"},
+  "training": {
+    "num_rounds": 1000,
+    "early_stopping_rounds": 20,
+    "maximize": false
+  }
+}
+```
+
+Early stopping requires validation, one explicit `model.eval_metric` string,
+positive integer patience, and an explicit boolean `training.maximize`.
+Patience may exceed the round limit. The native XGBoost callback selects the
+best prefix even when the round limit is reached before patience expires.
+Linear Boosters cannot export this selected prefix. A provided validation
+shard must be non-empty on every Worker, matching the current train-shard
+restriction. Invalid inputs or non-finite selection scores fail training.
+
+Omit early-stopping fields to preserve fixed-round training. Validation can
+still be provided for evaluation; train-only requests remain supported.
+Execution metrics distinguish `training_rounds` (executed rounds) from
+`model_rounds` (rounds in the exported model). Early-stopped fits additionally
+return zero-based `best_iteration`, `best_score`, `selection_metric`, and
+`maximize`. The `train-*` and `validation-*` metrics describe the last executed
+round; `best_score` describes the selected round. Both ONNX and native UBJ
+artifacts contain the selected model and a digest-checked
+`training_metadata.json` sidecar. Best-model selection does
+not depend on a consumer supplying an iteration range at prediction time.
+
+For H&M, use validation logloss for stopping. XGBoost's distributed AUC is an
+[approximation](https://xgboost.readthedocs.io/en/stable/parameter.html#learning-task-parameters).
+Compute AP, ROC-AUC, and Lift over the complete held-out predictions and labels
+in the calling application.
+
+## XGBoost periodic checkpoints and same-run recovery
+
+Enable periodic saving and a finite Worker failure allowance in the existing
+configuration:
+
+```json
+{
+  "training": {"num_rounds": 20, "checkpoint_interval_rounds": 10},
+  "ray": {"storage_path": "/shared/checkpoints", "max_failures": 1}
+}
+```
+
+Both fields default to zero. Values must be non-negative integers; booleans
+and infinite retry budgets are rejected. A positive `max_failures` requires
+a positive checkpoint interval. Saving without retries is allowed. Ray Train
+V2 owns checkpoint transport and Worker group restarts; every trainer invocation
+has a unique storage name. All nodes must access the same durable storage path.
+Recovery requires `gbtree`, fixed Worker count/environment, and frozen inputs.
+The exercised baseline is Ray 2.59.0 with XGBoost 3.4.1 and Core 1.2.0.
+
+`num_rounds` remains the total target: restoring round 10 with a target of 20
+adds at most 10 rounds. Checkpoints retain the full training Booster, ordered
+features, invocation/plan identity, environment versions, file digests, and
+early-stopping score history. Native early stopping replays that history to
+retain best score and patience progress. A checkpoint that has reached the
+round limit or stopped early adds no further rounds. Corrupt or incompatible
+state fails explicitly, without silently restarting from zero. A failure before
+the first checkpoint may restart from zero within the configured allowance.
+
+The latest recovery state and selected inference model are separate. Only a
+final checkpoint can be exported; both Bundle formats contain the selected
+model. Metrics include `resumed_from_round` and `attempt_training_rounds`, whose
+sum equals `training_rounds`. Final Worker receipts contain only the successful
+group's input counts and newly executed rounds, including zero for terminal
+recovery. Failed attempts do not contribute to coverage evidence.
+
+This supports Worker process failures within one `fit()`. Cross-run
+`runtime.resume_from`, Driver/Controller or cluster disaster recovery, elastic
+Worker counts, and Tune are outside this feature. The public stage-runner API
+is unchanged and keeps recovery disabled. Input identity checks do not detect
+changed contents behind the same mutable URI. UBJ continuation does not promise
+bitwise equivalence for random sampling, GPU training, or changed data shards;
+the Gate uses deterministic CPU histogram training without sampling.
+
+## XGBoost Worker Gate
+
+XGBoost consumes replayable Ray Train shards in batches of at most 65,536 rows.
+The existing Core Framework Native and multi-stage entry points share this
+Worker loop; Core continues to manage execution and Bundle delivery.
+
+PR CI also runs a small single-node Ray Jobs smoke for the installed aggregate
+Wheel. Its pinned Python/Core/Ray profile is recorded in
+`tests/jobs/xgboost-single-node-smoke.env`. The smoke checks the
+end-to-end training and Bundle inference path; it does not validate cross-node
+execution. The manual Gate below remains the cross-node validation harness.
+
+The Gate targets a two-node Docker Ray 2.59.0 cluster with the same fixed
+Tributo Core 1.2.0 and algorithm Wheels installed on every node, together with the
+`boosting` extra. Use a shared directory mounted at the same absolute path on
+both nodes. Submit from this repository through Ray Jobs:
+
+```bash
+ray job submit --address "$RAY_DASHBOARD_URL" --working-dir . \
+  -- python tests/jobs/xgboost_worker_gate.py --root "$GATE_SHARED_ROOT"
+```
+
+`GATE_SHARED_ROOT` must name a new directory. The job checks the Core execution
+path and `XGBoostStageRunner` with two Workers on different nodes, 131,075 input
+train rows, 131,077 validation rows, synchronized model digests, train-only
+and validation fits, early stopping, selected-model reload, and ONNX/native
+Bundle artifacts. A separate bounded routing fixture verifies row identities
+for both input roles, and an empty validation case must fail without publishing
+a Bundle. Recovery cases inject real Worker exits after the controller confirms
+checkpoint persistence: 10-to-20-round continuation, interruption during
+patience, further improvement up to the round cap, final-checkpoint recovery
+with no new rounds, finite retry exhaustion, and invocation/checkpoint isolation.
+Final receipts are matched to the last successful group. It preserves
+`result.json`, failure events, receipts, and model outputs
+under that directory. This targeted Gate does not certify other runtime images
+or execution profiles.
+
+## X-Learner held-out effect evaluation
+
+`evaluate_cate_predictions` and `evaluate_rct_predictions` are public, model-independent functions exported by `tributo_algorithms_causal_xlearner`. They consume predictions from an already trained Bundle and do not train, read files, start Ray, or publish a model. Prediction and truth/observation IDs must be unique and cover exactly the same cohort.
+
+For binary-outcome randomized experiments, use the known constant treatment-assignment probability and a policy fixed before looking at the test outcomes:
+
+```python
+from tributo_algorithms_causal_xlearner import evaluate_rct_predictions
+
+report = evaluate_rct_predictions(
+    prediction_ids=prediction_ids,
+    cate_predictions=predicted_cate,
+    observation_ids=observation_ids,
+    treatment=observed_treatment,
+    outcome=observed_visit,
+    assignment_probability=0.5,
+    experiment_id="hillstrom-womens-email-vs-no-email",
+    policy_coverage=0.2,
+    n_bins=10,
+    confidence_level=0.95,
+    n_bootstrap=200,
+    seed=7,
+)
+```
+
+Declaring an experiment ID does not verify randomization. Do not substitute learned propensity scores or apply this RCT interpretation to observational ACIC assignments. Dataset selection, treatment direction, and the source's randomization design remain the caller's responsibility.
+
+The `rct-ipw-v1` result contains cohort counts, metric definitions and units, uplift bins, curve data, policy values, and intervals. With known probability `p`, the contribution is `T*Y/p - (1-T)*Y/(1-p)`. Sort by decreasing predicted CATE and ascending sample ID; the cumulative curve at rank `k` is the sum of its first `k` contributions divided by the full cohort size. `auuc_ipw` integrates every rank, including the origin, against coverage. `qini_ipw` integrates the signed difference from the line joining the origin and full-cohort endpoint. Both are unnormalized outcome-probability areas. Zero and negative gain are valid; no division by net gain occurs. The IPW endpoint and the unweighted treatment/control mean difference are reported separately and need not coincide.
+
+Exactly one of `policy_coverage` and `policy_threshold` is required. Coverage chooses `floor(n * coverage)` customers with ID tie-breaking; thresholds choose CATE greater than or equal to the threshold. Values use inverse-probability weighting and compare with no treatment, all treatment, and random treatment at the policy's realized coverage. Customer bootstrap preserves treatment-arm counts and the original policy actions; it never refits, reranks, or selects a new policy. Percentile intervals cover ATE and policy statistics; bins have separate within-bin, within-arm intervals when each arm has at least two observations. Insufficient bins remain present with an explicit status and null interval. There are no simultaneous curve/area intervals or training-uncertainty claims.
+
+The public RCT function accepts at most 100,000 rows, 100 bins, and 1,000 bootstrap resamples (minimum two). It requires at least two observations per arm, consistent string or integer ID types, finite scores, binary treatment and outcomes, and valid probabilities. It rejects bad rows rather than silently dropping them. Results are JSON-serializable; applications may render the returned curves without implementing metric mathematics.
+
+Training retains separate descriptive OOF diagnostics under `xlearner-oof-normalized-v1`. Their `qini`/`auuc` use an empirical arm ratio and a binary reference normalization, not the held-out IPW definitions; `metric_status` identifies zero-normalizer legacy fallbacks. The full-cohort endpoint and AUUC denominator use the same gain computed from arm-level outcome totals; a tolerance of eight ULPs at the arm-total scale treats cancellation residuals as zero without a fixed absolute cutoff. The `normalization` object reports the unrounded `full_cohort_gain` and `zero_tolerance`; zero gain retains the numeric AUUC fallback 0.5 with `undefined_zero_normalizer` status, rather than presenting that fallback as a valid estimate. These diagnostics do not establish randomization or validate observational causal effects. Model output names, the CATE formula, response/uplift quadrant labels and codes, native flavor, and ONNX contract remain compatible with the mainline implementation. The final Bundle uses a five-stage refit on the full training input; held-out effect validation remains separate from OOF diagnostics.
+
+PR CI runs the installed aggregate Wheel through a single-node Ray Jobs smoke
+using a deterministic truth-known fixture. The smoke exercises X-Learner fit,
+loads its Bundle through the batch prediction capability, and reports
+unnormalized root PEHE and absolute population ATE error on a held-out cohort.
+The same Job calls the public RCT evaluator on a separate binary experiment fixture and checks the ordered OOF scan against shuffled input and 1/3/7 physical-block layouts, including repeated keys. These checks run in the Docker Ray Job, without an opt-in skipped local-Ray test. They do not claim validation on the Hillstrom data itself.
+
+The manual ACIC 2016 Gate uses a prepared CSV or Parquet file that is not
+committed to the repository. It must contain unique `sample_id`, binary
+`treatment`, factual `outcome`, expected potential-outcome means `mu0` and
+`mu1`, and at least three numeric feature columns named contiguously `x0`,
+`x1`, ... . The file must not contain extra columns: unmapped fields are
+rejected so potential-outcome truth cannot accidentally become a feature.
+Categorical covariates must be encoded numerically before preparation. The
+result's `schema_mapping` records the canonical columns in the prepared file;
+it does not infer the original ACIC column names or categorical encoding. Keep
+those preparation details with the local dataset provenance. The Gate verifies
+the checksum of the exact prepared file, separates training rows from held-out
+rows with the recorded seed, and excludes `mu0` and `mu1` from training input.
+
+For a manual run, use one fixed ACIC setting and replication, then record the
+source, setting, replication, schema mapping, split seed, and prepared-file
+SHA-256 in the result. The reported metrics are project-local unnormalized
+root PEHE in outcome units and population ATE error over the held-out cohort;
+they do not reproduce the ACIC competition's normalized PEHE or SATT scoring.
+The dataset source is the [ACIC 2016 competition page](https://jenniferhill7.wixsite.com/acic-2016/competition).
+
+With the pinned Docker/Ray profile available, run the manual Gate as follows:
+
+```bash
+uv lock --check
+uv build --no-sources
+uv export \
+  --locked \
+  --extra causal-xlearner \
+  --no-dev \
+  --no-emit-project \
+  --no-annotate \
+  --output-file dist/xlearner-smoke-requirements.txt
+
+XLEARNER_ACIC_DATA_FILE=/path/to/acic-setting-replication.parquet \
+XLEARNER_ACIC_DATA_SHA256="replace-with-prepared-file-sha256" \
+XLEARNER_ACIC_SETTING_ID=1 \
+XLEARNER_ACIC_REPLICATION=1 \
+XLEARNER_ACIC_SPLIT_SEED=7 \
+bash tests/jobs/run_xlearner_single_node_smoke.sh
+```
+
+The Gate uses Tributo Core 1.2.0, Ray 2.59.0, Python 3.12, and the
+digest-pinned Ray image in `tests/jobs/xlearner-single-node-smoke.env`. It
+records the runtime, dataset checksum, Bundle identity, metrics, and logs, then
+removes only its own container and custom image. The result validates a
+single-node path and does not claim online-serving or multi-node support.
+For a local manual run, pull the pinned base image through the configured
+registry mirror, tag it with the value of `RAY_LOCAL_TAG` in the profile, and
+ensure its repository digest matches the profile. The runner verifies the
+digest and does not pull the base image from the default registry.

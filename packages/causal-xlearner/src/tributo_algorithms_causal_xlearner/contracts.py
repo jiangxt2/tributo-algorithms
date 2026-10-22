@@ -3,7 +3,34 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from math import isfinite
 from typing import Any
+
+
+def _finite_number(value: object, name: str) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(f"{name} must be a finite number")
+    try:
+        normalized = float(value)
+    except (OverflowError, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite number") from exc
+    if not isfinite(normalized):
+        raise ValueError(f"{name} must be a finite number")
+    return normalized
+
+
+def _validate_propensity_clip(value: object, name: str) -> tuple[float, float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError(f"{name} must contain exactly two numeric values")
+    lower = _finite_number(value[0], name)
+    upper = _finite_number(value[1], name)
+    if not 0.0 < lower < upper < 1.0:
+        raise ValueError(f"{name} must satisfy 0 < lower < upper < 1")
+    return lower, upper
+
+
+def _validate_response_threshold(value: object, name: str) -> float:
+    return _finite_number(value, name)
 
 
 class XLearnerConfigValidator:
@@ -24,6 +51,14 @@ class XLearnerConfigValidator:
             or not 2 <= folds <= 20
         ):
             raise ValueError("training.cross_fit_folds must be between 2 and 20")
+        _validate_propensity_clip(
+            training.get("propensity_clip", (0.01, 0.99)),
+            "training.propensity_clip",
+        )
+        _validate_response_threshold(
+            training.get("response_threshold", 0.5),
+            "training.response_threshold",
+        )
         for name in allowed:
             if not isinstance(value.get(name), Mapping):
                 raise ValueError(f"{name} config is required")

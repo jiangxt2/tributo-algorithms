@@ -73,8 +73,8 @@ def _lossless_folds(
     fold_count: int,
     *,
     seed: int,
-) -> tuple[object, ...]:
-    """Create stratified disjoint folds while retaining every row."""
+) -> tuple[tuple[object, object], ...]:
+    """Create stratified folds as separate treated/control datasets."""
     treated = (
         cast(Any, dataset)
         .filter(lambda row: row[treatment_name] == 1)
@@ -94,8 +94,7 @@ def _lossless_folds(
     treated_folds = _split_rows(treated, fold_count)
     control_folds = _split_rows(control, fold_count)
     return tuple(
-        cast(Any, treated_folds[index]).union(control_folds[index])
-        for index in range(fold_count)
+        (treated_folds[index], control_folds[index]) for index in range(fold_count)
     )
 
 
@@ -269,27 +268,21 @@ class _XLearnerDriver:
         scored_folds: list[object] = []
         stage_folds: dict[str, list[dict[str, object]]] = {name: [] for name in STAGES}
         stage_digests: dict[str, list[str]] = {name: [] for name in STAGES}
-        for fold_index, heldout in enumerate(folds):
+        for fold_index, (heldout_treated, heldout_control) in enumerate(folds):
             training_parts = folds[:fold_index] + folds[fold_index + 1 :]
-            train_data = cast(
-                Any,
-                (
-                    training_parts[0]
-                    if len(training_parts) == 1
-                    else cast(Any, training_parts[0]).union(*training_parts[1:])
-                ),
-            )
-            heldout_data = cast(Any, heldout)
-            train_treated = train_data.filter(lambda row: row[treatment_name] == 1)
-            train_control = train_data.filter(lambda row: row[treatment_name] == 0)
+            train_treated_parts = tuple(part[0] for part in training_parts)
+            train_control_parts = tuple(part[1] for part in training_parts)
+            train_treated = cast(Any, train_treated_parts[0])
+            train_control = cast(Any, train_control_parts[0])
+            if len(training_parts) > 1:
+                train_treated = train_treated.union(*train_treated_parts[1:])
+                train_control = train_control.union(*train_control_parts[1:])
+            train_data = train_treated.union(train_control)
+            heldout_data = cast(Any, heldout_treated).union(heldout_control)
             train_treated_rows = int(train_treated.count())
             train_control_rows = int(train_control.count())
-            heldout_treated_rows = int(
-                heldout_data.filter(lambda row: row[treatment_name] == 1).count()
-            )
-            heldout_control_rows = int(
-                heldout_data.filter(lambda row: row[treatment_name] == 0).count()
-            )
+            heldout_treated_rows = int(cast(Any, heldout_treated).count())
+            heldout_control_rows = int(cast(Any, heldout_control).count())
             if (
                 train_treated_rows < self.plan.runtime.worker_count
                 or train_control_rows < self.plan.runtime.worker_count
@@ -474,7 +467,7 @@ class _XLearnerDriver:
                 "state": final_stages[name].evidence["state"],
                 "input_complete": True,
                 "expected_training_rows": final_stages[name].row_count,
-                "cross_fit_folds": stage_folds[name],
+                "evaluation_cross_fit_folds": stage_folds[name],
                 "final_fit": dict(final_stages[name].evidence),
             }
             for name in STAGES

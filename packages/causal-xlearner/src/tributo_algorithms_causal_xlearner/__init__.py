@@ -7,11 +7,27 @@ from typing import Any
 from tributo_algorithms_causal_xlearner.descriptor import X_LEARNER_DESCRIPTOR
 
 _LAZY_EXPORTS = {
+    "evaluate_rct_predictions": (
+        "tributo_algorithms_causal_xlearner.rct_metrics",
+        "evaluate_rct_predictions",
+    ),
+    "RCTEvaluationResult": (
+        "tributo_algorithms_causal_xlearner.rct_metrics",
+        "RCTEvaluationResult",
+    ),
     "DistributedXLearner": (
         "tributo_algorithms_causal_xlearner.algorithm",
         "DistributedXLearner",
     ),
     "XLearnerModel": ("tributo_algorithms_causal_xlearner.model", "XLearnerModel"),
+    "evaluate_cate_predictions": (
+        "tributo_algorithms_causal_xlearner.truth_metrics",
+        "evaluate_cate_predictions",
+    ),
+    "CATEEvaluationResult": (
+        "tributo_algorithms_causal_xlearner.truth_metrics",
+        "CATEEvaluationResult",
+    ),
 }
 
 
@@ -26,4 +42,12 @@ def __getattr__(name: str) -> Any:
     return value
 
 
-__all__ = ["DistributedXLearner", "XLearnerModel", "X_LEARNER_DESCRIPTOR"]
+__all__ = [
+    "DistributedXLearner",
+    "XLearnerModel",
+    "X_LEARNER_DESCRIPTOR",
+    "CATEEvaluationResult",
+    "evaluate_cate_predictions",
+    "RCTEvaluationResult",
+    "evaluate_rct_predictions",
+]

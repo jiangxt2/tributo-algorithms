@@ -96,7 +96,7 @@ def test_root_metadata_declares_one_distribution_and_all_domain_extras() -> None
     project = tomllib.loads((_ROOT / "pyproject.toml").read_text())
 
     assert project["project"]["name"] == "tributo-algorithms"
-    assert project["project"]["dependencies"] == ["tributo>=1.1"]
+    assert project["project"]["dependencies"] == ["tributo>=1.2"]
     entry_points = project["project"]["entry-points"]
     assert len(entry_points["tributo.algorithms"]) == 37
     assert len(entry_points["tributo.exporters"]) == 9
@@ -140,7 +140,7 @@ def test_root_metadata_declares_one_distribution_and_all_domain_extras() -> None
 
 @pytest.mark.parametrize(
     ("version", "accepted"),
-    [("1.0.0", False), ("1.1.0", True), ("1.2.0.dev0", True), ("1.2.0", True)],
+    [("1.0.0", False), ("1.1.0", False), ("1.2.0.dev0", False), ("1.2.0", True)],
 )
 def test_core_dependencies_keep_only_the_minimum_version(
     version: str, accepted: bool
@@ -161,7 +161,7 @@ def test_core_dependencies_keep_only_the_minimum_version(
     ]
     assert core_requirements
     for requirement in core_requirements:
-        assert requirement.specifier == SpecifierSet(">=1.1")
+        assert requirement.specifier == SpecifierSet(">=1.2")
         assert requirement.specifier.contains(version, prereleases=True) is accepted
 
 
@@ -196,6 +196,154 @@ def test_ci_and_release_workflows_cover_single_artifact_flow() -> None:
     assert "sha256sum --check SHA256SUMS" in release
     assert release.count("uses: pypa/gh-action-pypi-publish@release/v1") == 2
     assert "id-token: write" in release
+
+
+def test_xgboost_single_node_smoke_profile_matches_the_lock() -> None:
+    profile_path = _ROOT / "tests" / "jobs" / "xgboost-single-node-smoke.env"
+    profile = {
+        key: value
+        for line in profile_path.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+        for key, value in [line.split("=", 1)]
+    }
+    locked_packages = tomllib.loads((_ROOT / "uv.lock").read_text())["package"]
+    locked_versions = {
+        name: next(
+            package["version"] for package in locked_packages if package["name"] == name
+        )
+        for name in ("ray", "tributo")
+    }
+
+    assert profile["PYTHON_VERSION"] == "3.12"
+    assert profile["TRIBUTO_CORE_VERSION"] == locked_versions["tributo"] == "1.2.0"
+    assert profile["RAY_VERSION"] == locked_versions["ray"] == "2.59.0"
+    assert profile["RAY_IMAGE"].startswith("rayproject/ray:2.59.0-py312@sha256:")
+    image_digest = profile["RAY_IMAGE"].split("@sha256:", maxsplit=1)[1]
+    assert len(image_digest) == 64
+    assert all(character in "0123456789abcdef" for character in image_digest)
+
+
+def test_xgboost_single_node_smoke_is_a_separate_ci_tier() -> None:
+    ci = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    dockerfile = (
+        _ROOT / "tests" / "jobs" / "Dockerfile.xgboost-single-node-smoke"
+    ).read_text(encoding="utf-8")
+    runner = (_ROOT / "tests" / "jobs" / "run_xgboost_single_node_smoke.sh").read_text(
+        encoding="utf-8"
+    )
+    payload = (_ROOT / "tests" / "jobs" / "xgboost_single_node_smoke.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "xgboost-single-node-smoke:" in ci
+    assert "needs: validate" in ci
+    assert 'python-version: "3.12"' in ci
+    assert "uv export" in ci
+    assert "Dockerfile.xgboost-single-node-smoke" in runner
+    assert 'source "$ROOT_DIR/tests/jobs/xgboost-single-node-smoke.env"' in runner
+    assert '--build-arg "RAY_IMAGE=$RAY_IMAGE"' in runner
+    assert "ARG RAY_IMAGE" in dockerfile and "FROM " in dockerfile
+    assert "--require-hashes" in dockerfile
+    assert "ray job submit" in runner
+    assert "trap cleanup EXIT" in runner
+    assert "trap 'exit 130' INT" in runner
+    assert "trap 'exit 143' TERM" in runner
+    assert "--expected-tributo-version" in runner
+    assert "--expected-ray-version" in runner
+    assert "--expected-ray-image" in runner
+    assert "RUNTIME VERSIONS:" in payload
+    assert "ReadOptions(target_parallelism=4)" in payload
+    assert 'ray.init(address="auto")' in payload
+    assert "len({worker.node_id for worker in receipt.workers}) == 1" in payload
+    assert '"ray_image": args.expected_ray_image' in payload
+    assert "native_onnx_prediction_parity" in payload
+    assert "xgboost_worker_gate.py" not in ci
+
+
+def test_xlearner_single_node_smoke_profile_matches_the_lock() -> None:
+    profile_path = _ROOT / "tests" / "jobs" / "xlearner-single-node-smoke.env"
+    profile = {
+        key: value
+        for line in profile_path.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+        for key, value in [line.split("=", 1)]
+    }
+    locked_packages = tomllib.loads((_ROOT / "uv.lock").read_text())["package"]
+    locked_versions = {
+        name: next(
+            package["version"] for package in locked_packages if package["name"] == name
+        )
+        for name in ("ray", "tributo")
+    }
+    xgboost_profile_path = _ROOT / "tests" / "jobs" / "xgboost-single-node-smoke.env"
+    xgboost_profile = {
+        key: value
+        for line in xgboost_profile_path.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+        for key, value in [line.split("=", 1)]
+    }
+
+    assert profile["PYTHON_VERSION"] == "3.12"
+    assert profile["TRIBUTO_CORE_VERSION"] == locked_versions["tributo"] == "1.2.0"
+    assert profile["RAY_VERSION"] == locked_versions["ray"] == "2.59.0"
+    assert profile["RAY_IMAGE"] == xgboost_profile["RAY_IMAGE"]
+    assert profile["RAY_LOCAL_TAG"] == "rayproject/ray:2.59.0-py312"
+
+
+def test_xlearner_single_node_smoke_covers_batch_effect_evaluation() -> None:
+    ci = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    readme = (_ROOT / "README.md").read_text(encoding="utf-8")
+    dockerfile = (
+        _ROOT / "tests" / "jobs" / "Dockerfile.xlearner-single-node-smoke"
+    ).read_text(encoding="utf-8")
+    runner = (_ROOT / "tests" / "jobs" / "run_xlearner_single_node_smoke.sh").read_text(
+        encoding="utf-8"
+    )
+    payload = (_ROOT / "tests" / "jobs" / "xlearner_single_node_smoke.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "xlearner-single-node-smoke:" in ci
+    assert ci.count("  xlearner-single-node-smoke:") == 1
+    assert "needs: validate" in ci
+    assert 'python-version: "3.12"' in ci
+    assert "--extra causal-xlearner" in ci
+    assert "Dockerfile.xlearner-single-node-smoke" in runner
+    assert 'source "$ROOT_DIR/tests/jobs/xlearner-single-node-smoke.env"' in runner
+    assert '--build-arg "RAY_IMAGE=$RAY_BUILD_IMAGE"' in runner
+    assert "ARG RAY_IMAGE" in dockerfile and "FROM " in dockerfile
+    assert "--require-hashes" in dockerfile
+    assert "ray job submit" in runner
+    assert "trap cleanup EXIT" in runner
+    assert "trap 'exit 130' INT" in runner
+    assert "trap 'exit 143' TERM" in runner
+    assert 'docker_cli container rm --force "$CONTAINER_NAME"' in runner
+    assert 'docker_cli image rm "$IMAGE_TAG"' in runner
+    assert "/tmp/ray/session_latest/logs" in runner
+    assert "ray-session-logs-copy.log" in runner
+    assert runner.index("/tmp/ray/session_latest/logs") < runner.index(
+        'docker_cli container rm --force "$CONTAINER_NAME"'
+    )
+    assert "dangling-images-before.log" in runner
+    assert "docker-system-df-before.log" in runner
+    assert "docker_cli system df" in runner
+    assert "RAY_REPO_DIGESTS" in runner
+    assert "EXPECTED_RAY_DIGEST" in runner
+    assert "docker system prune" not in runner
+    assert "BundleModelLoader" in payload
+    assert 'use_case="batch"' in payload
+    assert "evaluate_cate_predictions" in payload
+    assert "ray.nodes()" in payload
+    assert "ACIC_SOURCE_URL" in payload
+    assert "_file_sha256" in payload
+    assert "mu0" in payload and "mu1" in payload
+    assert "--acic-sha256" in runner
+    assert '"sample_id", "treatment", "outcome"' in payload
+    assert "fit metrics do not cover all training rows" in payload
+    assert '"fit_metrics": result["fit_metrics"]' in payload
+    assert "uv build --no-sources" in readme
+    assert "uv export" in readme
+    assert "--extra causal-xlearner" in readme
 
 
 def test_source_free_verifier_exercises_scalar_binding_contract() -> None:

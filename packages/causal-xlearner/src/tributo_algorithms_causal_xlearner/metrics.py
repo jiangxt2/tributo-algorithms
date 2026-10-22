@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from typing import Any, cast
 
@@ -18,28 +19,10 @@ CATE_COLUMN = "cate"
 QUADRANT_COLUMN = "quadrant"
 CONTRIBUTION_COLUMN = "__tributo_xlearner_contribution"
 
-QUADRANT_ORDER = ("persuadable", "sure_thing", "lost_cause", "sleeping_dog")
+QUADRANT_ORDER = tuple(QUADRANT_CODES)
 QUADRANT_META: Mapping[str, Mapping[str, str]] = {
-    "persuadable": {
-        "name": "intervention_sensitive",
-        "description": "responds only when treated",
-        "action": "prioritize_treatment",
-    },
-    "sure_thing": {
-        "name": "natural_responder",
-        "description": "responds with or without treatment",
-        "action": "avoid_unnecessary_treatment",
-    },
-    "lost_cause": {
-        "name": "non_responder",
-        "description": "responds under neither condition",
-        "action": "do_not_prioritize",
-    },
-    "sleeping_dog": {
-        "name": "negative_responder",
-        "description": "responds only without treatment",
-        "action": "avoid_treatment",
-    },
+    name: {"name": name, "description": "predicted response/uplift quadrant"}
+    for name in QUADRANT_ORDER
 }
 
 _PREFIX_FIELDS = (
@@ -69,6 +52,7 @@ _SUMMARY_RECORD = "summary"
 _PREFIX_RECORD = "prefix"
 _SUMMARY_ONLY_FIELDS = (
     "count",
+    "non_binary_outcome_count",
     "positive_contribution_count",
     "zero_contribution_count",
     "negative_contribution_count",
@@ -124,6 +108,7 @@ def _summarize_batch(frame: Any) -> dict[str, object]:
     contribution = frame[CONTRIBUTION_COLUMN].to_numpy(dtype=np.float64)
     row: dict[str, object] = {
         "count": int(len(frame)),
+        "non_binary_outcome_count": int((~np.isin(outcome, (0.0, 1.0))).sum()),
         "gain": float(contribution.sum()),
         "cate_sum": float(frame[CATE_COLUMN].sum()),
         "treated_count": int((treatment == 1).sum()),
@@ -262,7 +247,25 @@ def _build_report(
         float(min(rank, positive) - ratio * max(0, rank - positive - zero))
         for rank in curve_ranks
     ]
-    total_gain = model_gain[-1]
+    # Use arm totals for the endpoint, rather than a sorted cumulative tail.
+    # In particular, 1 - 1/3 - 1/3 - 1/3 must not normalize by its residual.
+    treated_total = math.fsum(
+        _as_float(item["treated_outcome_sum"]) for item in summaries
+    )
+    weighted_control_total = ratio * math.fsum(
+        _as_float(item["control_outcome_sum"]) for item in summaries
+    )
+    total_gain = math.fsum((treated_total, -weighted_control_total))
+    # An ULP-based tolerance follows the data scale, without an absolute floor
+    # that would erase meaningful gains when all outcomes are very small.
+    gain_scale = max(abs(treated_total), abs(weighted_control_total))
+    gain_zero_tolerance = 8.0 * math.ulp(gain_scale)
+    if abs(total_gain) <= gain_zero_tolerance:
+        total_gain = 0.0
+    model_gain[-1] = total_gain
+    binary_reference_valid = all(
+        _as_int(item.get("non_binary_outcome_count", 0)) == 0 for item in summaries
+    )
     random_gain = [total_gain * value for value in x_axis]
     random_area = _area(random_gain)
     perfect_denom = _area(perfect_gain) - random_area
@@ -360,6 +363,31 @@ def _build_report(
             "segmentBounds": _segment_bounds(model_gain, x_axis),
         },
         "calibration": {"points": calibration},
+        "metric_version": "xlearner-oof-normalized-v1",
+        "normalization": {
+            "full_cohort_gain": total_gain,
+            "zero_tolerance": gain_zero_tolerance,
+        },
+        "metric_definitions": {
+            "qini": "gain area above random divided by binary-reference area above random",
+            "auuc": "gain area divided by full-cohort gain; random ordering is 0.5",
+            "assignment": "empirical treated/control ratio, not known RCT assignment probability",
+        },
+        "metric_status": {
+            "qini": (
+                "unsupported_non_binary_outcome"
+                if not binary_reference_valid
+                else "ok"
+                if perfect_denom != 0
+                else "undefined_zero_normalizer"
+            ),
+            "auuc": "ok" if total_gain != 0 else "undefined_zero_normalizer",
+        },
+        "limitations": [
+            "Descriptive OOF diagnostics; random assignment is not established.",
+            "Normalized binary-reference metrics are not the held-out rct-ipw-v1 metrics.",
+            "Zero normalizers retain legacy numeric fallbacks; consult metric_status.",
+        ],
     }
 
 
@@ -413,6 +441,9 @@ def evaluate_xlearner_dataset(
         )
         .materialize()
     )
+    # The stateful prefix scan must receive sorted blocks in sequence as well
+    # as executing actor calls in order. This is Dataset-local, not global.
+    scored.context.execution_options.preserve_order = True
     scan_rows = cast(
         list[Mapping[str, object]],
         # The scan is a lightweight NumPy reduction. A fractional reservation

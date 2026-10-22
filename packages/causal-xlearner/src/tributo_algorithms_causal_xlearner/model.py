@@ -7,13 +7,15 @@ from typing import Any, Mapping, cast
 
 import numpy as np
 
+from .contracts import _validate_propensity_clip, _validate_response_threshold
+
 STAGES = ("mu0", "mu1", "tau0", "tau1", "propensity")
 FORMULA = "cate=propensity*tau0+(1-propensity)*tau1"
 QUADRANT_CODES = {
-    "persuadable": 1,
-    "sure_thing": 2,
-    "lost_cause": 3,
-    "sleeping_dog": 4,
+    "low_response_low_uplift": 0,
+    "low_response_high_uplift": 1,
+    "high_response_low_uplift": 2,
+    "high_response_high_uplift": 3,
 }
 STAGE_OBJECTIVES = {
     "mu0": "reg:squarederror",
@@ -48,8 +50,12 @@ class XLearnerModel:
             raise ValueError("X-Learner requires exactly five Booster stages")
         self.boosters = dict(boosters)
         self.feature_names = feature_names
-        self.response_threshold = response_threshold
-        self.propensity_clip = propensity_clip
+        self.response_threshold = _validate_response_threshold(
+            response_threshold, "response_threshold"
+        )
+        self.propensity_clip = _validate_propensity_clip(
+            propensity_clip, "propensity_clip"
+        )
 
     @classmethod
     def from_raw(
@@ -83,19 +89,16 @@ class XLearnerModel:
         cate = (
             propensity * predictions["tau0"] + (1.0 - propensity) * predictions["tau1"]
         )
-        control_response = predictions["mu0"] >= self.response_threshold
-        treated_response = predictions["mu1"] >= self.response_threshold
+        response = np.maximum(predictions["mu0"], predictions["mu1"])
+        high_response = response >= self.response_threshold
+        high_uplift = cate >= 0.0
         quadrant = np.where(
-            control_response,
+            high_response,
             np.where(
-                treated_response,
-                "sure_thing",
-                "sleeping_dog",
+                high_uplift, "high_response_high_uplift", "high_response_low_uplift"
             ),
             np.where(
-                treated_response,
-                "persuadable",
-                "lost_cause",
+                high_uplift, "low_response_high_uplift", "low_response_low_uplift"
             ),
         )
         return XLearnerPrediction(

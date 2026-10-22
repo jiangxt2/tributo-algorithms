@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
-import os
+import json
 import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import pytest
 from tributo.algorithms.api import AlgorithmExecutionError
+from tributo.exceptions import ModelLoadError
 from tributo.exporting.models import (
     ExportContext,
     ExportSource,
@@ -25,6 +27,7 @@ from tributo_algorithms_causal_xlearner.algorithm import (
 )
 from tributo_algorithms_causal_xlearner.contracts import XLearnerConfigValidator
 from tributo_algorithms_causal_xlearner.exporter import XLearnerONNXExporter
+from tributo_algorithms_causal_xlearner.flavor import XLearnerFlavor
 from tributo_algorithms_causal_xlearner.metrics import (
     _PREFIX_RECORD,
     _RECORD_TYPE_COLUMN,
@@ -40,9 +43,10 @@ from tributo_algorithms_causal_xlearner.metrics import (
     _attach_stable_tie_breaker,
     _build_report,
     _OrderedMetricScan,
-    evaluate_xlearner_dataset,
+    _summarize_batch,
 )
 from tributo_algorithms_causal_xlearner.model import (
+    FORMULA,
     QUADRANT_CODES,
     STAGE_OBJECTIVES,
     STAGES,
@@ -58,8 +62,8 @@ def test_xlearner_owns_stable_algorithm_spec_and_stages() -> None:
     assert distribution.policy.component_stages == STAGES
 
 
-def test_xlearner_config_contract_requires_five_stage_inputs() -> None:
-    value = {
+def _valid_xlearner_config() -> dict[str, Any]:
+    return {
         "data": {
             "feature_columns": ["x0", "x1"],
             "treatment_col": "treatment",
@@ -71,7 +75,153 @@ def test_xlearner_config_contract_requires_five_stage_inputs() -> None:
         "ray": {"storage_path": "/tmp/xlearner"},
         "output": {"bundle_uri": "/tmp/xlearner-bundle"},
     }
+
+
+def test_xlearner_config_contract_requires_five_stage_inputs() -> None:
+    value = _valid_xlearner_config()
+
     assert XLearnerConfigValidator().validate(value) == value
+
+
+@pytest.mark.parametrize(
+    "propensity_clip",
+    [
+        [],
+        [0.2],
+        [0.2, 0.8, 0.9],
+        "0.2,0.8",
+        [0.0, 0.8],
+        [0.2, 1.0],
+        [0.8, 0.2],
+        [0.5, 0.5],
+        [np.nan, 0.8],
+        [0.2, np.inf],
+        [True, 0.8],
+    ],
+)
+def test_xlearner_config_rejects_invalid_propensity_clip(
+    propensity_clip: object,
+) -> None:
+    value = _valid_xlearner_config()
+    value["training"]["propensity_clip"] = propensity_clip
+
+    with pytest.raises(ValueError, match="training.propensity_clip"):
+        XLearnerConfigValidator().validate(value)
+
+
+@pytest.mark.parametrize("response_threshold", [np.nan, np.inf, -np.inf, True, "0.5"])
+def test_xlearner_config_rejects_invalid_response_threshold(
+    response_threshold: object,
+) -> None:
+    value = _valid_xlearner_config()
+    value["training"]["response_threshold"] = response_threshold
+
+    with pytest.raises(ValueError, match="training.response_threshold"):
+        XLearnerConfigValidator().validate(value)
+
+
+@pytest.mark.parametrize("response_threshold", [-1.5, 1.5])
+def test_xlearner_config_accepts_finite_thresholds_outside_probability_range(
+    response_threshold: float,
+) -> None:
+    value = _valid_xlearner_config()
+    value["training"].update(
+        propensity_clip=[0.2, 0.8], response_threshold=response_threshold
+    )
+
+    assert XLearnerConfigValidator().validate(value) == value
+
+
+@pytest.mark.parametrize(
+    "propensity_clip",
+    [
+        (0.0, 0.8),
+        (0.2, 1.0),
+        (0.8, 0.2),
+        (0.5, 0.5),
+        (np.nan, 0.8),
+        (0.2, np.inf),
+        (True, 0.8),
+    ],
+)
+def test_xlearner_model_rejects_invalid_propensity_clip(
+    propensity_clip: tuple[float, float],
+) -> None:
+    with pytest.raises(ValueError, match="propensity_clip"):
+        XLearnerModel(
+            {stage: object() for stage in STAGES},
+            feature_names=("x0",),
+            response_threshold=0.5,
+            propensity_clip=propensity_clip,
+        )
+
+
+@pytest.mark.parametrize("response_threshold", [np.nan, np.inf, -np.inf, True])
+def test_xlearner_model_rejects_invalid_response_threshold(
+    response_threshold: float,
+) -> None:
+    with pytest.raises(ValueError, match="response_threshold"):
+        XLearnerModel(
+            {stage: object() for stage in STAGES},
+            feature_names=("x0",),
+            response_threshold=response_threshold,
+            propensity_clip=(0.2, 0.8),
+        )
+
+
+@pytest.mark.parametrize("response_threshold", [-1.5, 1.5])
+def test_xlearner_model_accepts_finite_thresholds_outside_probability_range(
+    response_threshold: float,
+) -> None:
+    model = XLearnerModel(
+        {stage: object() for stage in STAGES},
+        feature_names=("x0",),
+        response_threshold=response_threshold,
+        propensity_clip=(0.2, 0.8),
+    )
+
+    assert model.response_threshold == response_threshold
+    assert model.propensity_clip == (0.2, 0.8)
+
+
+def test_xlearner_flavor_rejects_boolean_response_threshold_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeBooster:
+        def load_model(self, path: str) -> None:
+            self.stage = Path(path).stem
+
+        def save_config(self) -> str:
+            return json.dumps(
+                {"learner": {"objective": {"name": STAGE_OBJECTIVES[self.stage]}}}
+            )
+
+    fake_xgboost = ModuleType("xgboost")
+    fake_xgboost.Booster = FakeBooster
+    monkeypatch.setitem(sys.modules, "xgboost", fake_xgboost)
+
+    metadata_path = tmp_path / "model.json"
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "api_version": 1,
+                "formula": FORMULA,
+                "quadrant_codes": QUADRANT_CODES,
+                "components": {stage: f"{stage}.ubj" for stage in STAGES},
+                "feature_names": ["x0"],
+                "response_threshold": True,
+                "propensity_clip": [0.2, 0.8],
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifact: Any = SimpleNamespace(
+        entrypoint_path=metadata_path,
+        path_for=lambda name: tmp_path / name,
+    )
+
+    with pytest.raises(ModelLoadError, match="artifact is invalid"):
+        XLearnerFlavor().load(artifact, role="prediction")
 
 
 def test_xlearner_onnx_exporter_uses_core_v2_and_runtime_validation() -> None:
@@ -265,7 +415,7 @@ class _Booster:
         return self.values
 
 
-def test_xlearner_quadrants_follow_potential_response_semantics(
+def test_xlearner_quadrants_preserve_response_uplift_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import sys
@@ -278,10 +428,10 @@ def test_xlearner_quadrants_follow_potential_response_semantics(
     )
     model = XLearnerModel(
         {
-            "mu0": _Booster([0.1, 0.8, 0.1, 0.8]),
-            "mu1": _Booster([0.8, 0.8, 0.1, 0.1]),
-            "tau0": _Booster([0.2, 0.0, 0.0, -0.2]),
-            "tau1": _Booster([0.2, 0.0, 0.0, -0.2]),
+            "mu0": _Booster([0.1, 0.1, 0.8, 0.8]),
+            "mu1": _Booster([0.2, 0.2, 0.9, 0.9]),
+            "tau0": _Booster([-0.2, 0.2, -0.2, 0.2]),
+            "tau1": _Booster([-0.2, 0.2, -0.2, 0.2]),
             "propensity": _Booster([0.5, 0.5, 0.5, 0.5]),
         },
         feature_names=("x0",),
@@ -292,30 +442,32 @@ def test_xlearner_quadrants_follow_potential_response_semantics(
     result = model.predict(np.arange(4, dtype=np.float32).reshape(-1, 1))
 
     assert result.quadrant.tolist() == [
-        "persuadable",
-        "sure_thing",
-        "lost_cause",
-        "sleeping_dog",
+        "low_response_low_uplift",
+        "low_response_high_uplift",
+        "high_response_low_uplift",
+        "high_response_high_uplift",
     ]
     assert QUADRANT_CODES == {
-        "persuadable": 1,
-        "sure_thing": 2,
-        "lost_cause": 3,
-        "sleeping_dog": 4,
+        "low_response_low_uplift": 0,
+        "low_response_high_uplift": 1,
+        "high_response_low_uplift": 2,
+        "high_response_high_uplift": 3,
     }
 
 
 def test_xlearner_report_contains_complete_uplift_evaluation() -> None:
     summary: dict[str, object] = {
+        "treated_outcome_sum": 1.0,
+        "control_outcome_sum": 1.0,
         "positive_contribution_count": 1,
         "zero_contribution_count": 2,
         "negative_contribution_count": 1,
     }
     for name, treatment, outcome in (
-        ("persuadable", 1, 1),
-        ("sure_thing", 0, 0),
-        ("lost_cause", 1, 0),
-        ("sleeping_dog", 0, 1),
+        ("low_response_high_uplift", 1, 1),
+        ("high_response_high_uplift", 0, 0),
+        ("low_response_low_uplift", 1, 0),
+        ("high_response_low_uplift", 0, 1),
     ):
         summary[f"quadrant.{name}.count"] = 1
         summary[f"quadrant.{name}.treated_count"] = treatment
@@ -381,17 +533,16 @@ def test_xlearner_report_contains_complete_uplift_evaluation() -> None:
         {"predicted": 0.3, "actual": 1.0, "count": 2, "valid": True},
     ]
     assert [segment["label"] for segment in report["quadrant"]["segments"]] == [
+        0,
         1,
         2,
         3,
-        4,
     ]
-    assert [segment["type"] for segment in report["quadrant"]["segments"]] == [
-        "persuadable",
-        "sure_thing",
-        "lost_cause",
-        "sleeping_dog",
-    ]
+    assert [segment["type"] for segment in report["quadrant"]["segments"]] == list(
+        QUADRANT_CODES
+    )
+    assert report["metric_version"] == "xlearner-oof-normalized-v1"
+    assert report["metric_status"]["auuc"] == "undefined_zero_normalizer"
 
 
 def _metric_row(
@@ -415,6 +566,30 @@ def _metric_row(
     }
 
 
+def test_oof_summary_identifies_continuous_outcomes_for_binary_reference() -> None:
+    frame = pd.DataFrame(
+        [
+            _metric_row(
+                identity=1,
+                cate=0.1,
+                treatment=1,
+                outcome=1.5,
+                contribution=1.5,
+                quadrant="low_response_high_uplift",
+            ),
+            _metric_row(
+                identity=2,
+                cate=-0.1,
+                treatment=0,
+                outcome=0.0,
+                contribution=0.0,
+                quadrant="low_response_low_uplift",
+            ),
+        ]
+    )
+    assert _summarize_batch(frame)["non_binary_outcome_count"] == 1
+
+
 def test_xlearner_tie_breaker_is_stable_across_input_order() -> None:
     import pandas as pd
 
@@ -425,7 +600,7 @@ def test_xlearner_tie_breaker_is_stable_across_input_order() -> None:
             treatment=0,
             outcome=0.0,
             contribution=0.0,
-            quadrant="lost_cause",
+            quadrant="low_response_low_uplift",
         ),
         _metric_row(
             identity=7,
@@ -433,7 +608,7 @@ def test_xlearner_tie_breaker_is_stable_across_input_order() -> None:
             treatment=1,
             outcome=1.0,
             contribution=1.0,
-            quadrant="persuadable",
+            quadrant="low_response_high_uplift",
         ),
         _metric_row(
             identity=7,
@@ -441,7 +616,7 @@ def test_xlearner_tie_breaker_is_stable_across_input_order() -> None:
             treatment=0,
             outcome=1.0,
             contribution=-1.0,
-            quadrant="sleeping_dog",
+            quadrant="high_response_low_uplift",
         ),
     ]
     forward = _attach_stable_tie_breaker(pd.DataFrame(rows))
@@ -472,7 +647,7 @@ def test_xlearner_ordered_scan_is_linear_for_many_identical_physical_blocks() ->
                 treatment=1,
                 outcome=1.0,
                 contribution=1.0,
-                quadrant="persuadable",
+                quadrant="low_response_high_uplift",
             ),
         ]
         * block_rows
@@ -497,124 +672,102 @@ def test_xlearner_ordered_scan_is_linear_for_many_identical_physical_blocks() ->
     assert outputs[-1]["gain"].iloc[-1] == total_rows
 
 
-@pytest.mark.filterwarnings("ignore::FutureWarning")
-@pytest.mark.filterwarnings("ignore::ResourceWarning")
-@pytest.mark.skipif(
-    os.environ.get("TRIBUTO_REAL_RAY_TEST") != "1",
-    reason="requires an explicitly provisioned Ray worker runtime",
+def _normalization_report(
+    treatment: list[int], outcome: list[float], *, batch_size: int
+) -> dict[str, Any]:
+    """Feed actual prefix-scan records into reporting without starting Ray."""
+    rows = len(treatment)
+    treated_rows = sum(treatment)
+    control_rows = rows - treated_rows
+    ratio = treated_rows / control_rows
+    frame = pd.DataFrame(
+        [
+            _metric_row(
+                identity=index,
+                cate=float(rows - index),
+                treatment=assigned,
+                outcome=response,
+                contribution=response if assigned else -ratio * response,
+                quadrant="low_response_high_uplift",
+            )
+            for index, (assigned, response) in enumerate(zip(treatment, outcome))
+        ]
+    )
+    scan = _OrderedMetricScan(target_ranks=list(range(1, rows + 1)))
+    records = [
+        row
+        for start in range(0, rows, batch_size)
+        for row in scan(frame.iloc[start : start + batch_size]).to_dict("records")
+    ]
+    summaries = [row for row in records if row[_RECORD_TYPE_COLUMN] == _SUMMARY_RECORD]
+    prefixes = {
+        int(row["rank"]): row
+        for row in records
+        if row[_RECORD_TYPE_COLUMN] == _PREFIX_RECORD
+    }
+    return _build_report(
+        summaries=summaries,
+        prefixes=prefixes,
+        rows=rows,
+        treated_rows=treated_rows,
+        control_rows=control_rows,
+        fold_count=2,
+        n_points=rows + 1,
+        n_bins=2,
+    )
+
+
+@pytest.mark.parametrize("batch_size", [1, 3, 32])
+@pytest.mark.parametrize("treated_rows,control_rows", [(1, 3), (4, 12), (3, 1), (2, 2)])
+@pytest.mark.parametrize("constant_outcome", [0.0, 1.0])
+def test_oof_zero_net_gain_has_undefined_auuc_across_batch_layouts(
+    batch_size: int, treated_rows: int, control_rows: int, constant_outcome: float
+) -> None:
+    rows = treated_rows + control_rows
+    report = _normalization_report(
+        [1] * treated_rows + [0] * control_rows,
+        [constant_outcome] * rows,
+        batch_size=batch_size,
+    )
+    # Every arm has the same outcome: exact net gain is zero for any ratio.
+    assert report["auuc"] == 0.5
+    assert report["metric_status"]["auuc"] == "undefined_zero_normalizer"
+    assert report["upliftCurve"]["modelGain"][-1] == 0.0
+    assert report["upliftCurve"]["randomGain"] == [0.0] * (rows + 1)
+
+
+@pytest.mark.parametrize("batch_size", [1, 3, 32])
+@pytest.mark.parametrize(
+    "outcome,gain,auuc",
+    [
+        ([1.0, 0.0, 0.0, 0.0], 1.0, 0.875),
+        ([0.0, 1.0, 1.0, 1.0], -1.0, 0.375),
+        ([1e-20, 0.0, 0.0, 0.0], 1e-20, 0.875),
+    ],
 )
-def test_xlearner_evaluation_handles_duplicate_keys_and_uneven_partitions() -> None:
-    import random
-    import tempfile
+def test_oof_nonzero_gain_preserves_scale_and_normalized_area(
+    batch_size: int, outcome: list[float], gain: float, auuc: float
+) -> None:
+    report = _normalization_report([1, 0, 0, 0], outcome, batch_size=batch_size)
+    assert report["metric_status"]["auuc"] == "ok"
+    assert report["auuc"] == auuc
+    assert report["normalization"]["full_cohort_gain"] == gain
+    assert report["normalization"]["zero_tolerance"] < abs(gain)
 
-    import ray
 
-    with tempfile.TemporaryDirectory(prefix="tributo-ray-", dir="/tmp") as ray_dir:
-        ray.init(
-            num_cpus=2,
-            include_dashboard=False,
-            log_to_driver=False,
-            _temp_dir=ray_dir,
+@pytest.mark.parametrize("extra_response,undefined", [(4e-16, True), (1e-12, False)])
+def test_oof_zero_test_is_relative_to_the_outcome_total_scale(
+    extra_response: float, undefined: bool
+) -> None:
+    report = _normalization_report(
+        [1, 0, 0, 0], [1.0 + extra_response, 1.0, 1.0, 1.0], batch_size=4
+    )
+    if undefined:
+        assert report["metric_status"]["auuc"] == "undefined_zero_normalizer"
+        assert report["auuc"] == 0.5
+        assert report["normalization"]["full_cohort_gain"] == 0.0
+    else:
+        assert report["metric_status"]["auuc"] == "ok"
+        assert (
+            report["normalization"]["full_cohort_gain"] == (1.0 + extra_response) - 1.0
         )
-        try:
-            rows = [
-                _metric_row(
-                    identity=1,
-                    cate=0.8,
-                    treatment=1,
-                    outcome=1.0,
-                    contribution=1.0,
-                    quadrant="persuadable",
-                ),
-                _metric_row(
-                    identity=2,
-                    cate=0.2,
-                    treatment=0,
-                    outcome=0.0,
-                    contribution=0.0,
-                    quadrant="sure_thing",
-                ),
-                _metric_row(
-                    identity=2,
-                    cate=0.2,
-                    treatment=0,
-                    outcome=0.0,
-                    contribution=0.0,
-                    quadrant="sure_thing",
-                ),
-                _metric_row(
-                    identity=2,
-                    cate=0.2,
-                    treatment=0,
-                    outcome=1.0,
-                    contribution=-1.0,
-                    quadrant="sleeping_dog",
-                ),
-                _metric_row(
-                    identity=2,
-                    cate=0.2,
-                    treatment=1,
-                    outcome=0.0,
-                    contribution=0.0,
-                    quadrant="lost_cause",
-                ),
-                _metric_row(
-                    identity=2,
-                    cate=0.2,
-                    treatment=1,
-                    outcome=1.0,
-                    contribution=1.0,
-                    quadrant="persuadable",
-                ),
-                _metric_row(
-                    identity=2,
-                    cate=0.2,
-                    treatment=1,
-                    outcome=1.0,
-                    contribution=1.0,
-                    quadrant="persuadable",
-                ),
-                _metric_row(
-                    identity=4,
-                    cate=-0.8,
-                    treatment=0,
-                    outcome=1.0,
-                    contribution=-1.0,
-                    quadrant="sleeping_dog",
-                ),
-            ]
-            rows *= 4
-            reports = []
-            for seed, blocks in ((17, 1), (23, 3), (42, 7)):
-                shuffled = rows.copy()
-                random.Random(seed).shuffle(shuffled)
-                dataset = ray.data.from_items(
-                    shuffled,
-                    override_num_blocks=blocks,
-                )
-                reports.append(
-                    evaluate_xlearner_dataset(
-                        dataset,
-                        rows=32,
-                        treated_rows=16,
-                        control_rows=16,
-                        fold_count=2,
-                        n_points=17,
-                        n_bins=7,
-                    )
-                )
-
-            assert reports[1:] == [reports[0], reports[0]]
-            report = reports[0]
-            model_gain = report["upliftCurve"]["modelGain"]
-            assert len(model_gain) == 17
-            assert model_gain[0] == 0.0
-            assert model_gain[-1] == 4.0
-            assert report["ate"] == 0.15
-            assert report["evaluation"] == {
-                "method": "cross_fitted_oof",
-                "sampleSize": 32,
-            }
-            assert report["quadrant"]["total"] == 32
-        finally:
-            ray.shutdown()

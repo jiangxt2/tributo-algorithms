@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from math import isfinite
 from typing import Any
 
 
@@ -61,15 +62,20 @@ class ClassicalConfigValidator:
             numeric_item = normalized.get(numeric_name)
             if numeric_item is None:
                 continue
-            if (
-                not isinstance(numeric_item, (int, float))
-                or isinstance(numeric_item, bool)
-                or float(numeric_item) <= numeric_minimum
+            if not isinstance(numeric_item, (int, float)) or isinstance(
+                numeric_item, bool
             ):
                 raise ValueError(
                     f"{numeric_name} must be greater than {numeric_minimum}"
                 )
-            normalized[numeric_name] = float(numeric_item)
+            normalized_item = float(numeric_item)
+            if not isfinite(normalized_item):
+                raise ValueError(f"{numeric_name} must be finite")
+            if normalized_item <= numeric_minimum:
+                raise ValueError(
+                    f"{numeric_name} must be greater than {numeric_minimum}"
+                )
+            normalized[numeric_name] = normalized_item
         output = normalized.get("output")
         if output is not None and (
             not isinstance(output, Mapping)
