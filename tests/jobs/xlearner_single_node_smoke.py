@@ -32,8 +32,11 @@ from tributo.integrations.algorithm_inputs import (
 )
 from tributo_algorithms_causal_xlearner import (
     CATEEvaluationResult,
+    RCTEvaluationResult,
     evaluate_cate_predictions,
+    evaluate_rct_predictions,
 )
+from xlearner_evaluation_checks import verify_partitioned_evaluation
 
 ACIC_SOURCE_URL = "https://jenniferhill7.wixsite.com/acic-2016/competition"
 EVALUATION_COLUMNS = {"sample_id", "treatment", "outcome", "mu0", "mu1"}
@@ -334,20 +337,45 @@ def _run_fit(
         raise AssertionError("X-Learner fit metrics do not cover all training rows")
     if int(fit_metrics.get("cross_fit_folds", -1)) != FOLD_COUNT:
         raise AssertionError("X-Learner used an unexpected cross-fit fold count")
+    if result.execution_receipt is None:
+        raise AssertionError("X-Learner did not produce an execution receipt")
+    receipt = result.execution_receipt.to_dict()
+    details = result.execution_receipt.state.details
+    expected_stage_rows = {
+        "mu0": int(fit_metrics["control_rows"]),
+        "mu1": int(fit_metrics["treated_rows"]),
+        "tau0": int(fit_metrics["control_rows"]),
+        "tau1": int(fit_metrics["treated_rows"]),
+        "propensity": expected_rows,
+    }
+    for stage, expected in expected_stage_rows.items():
+        if details.get(f"stage.{stage}.rows") != expected:
+            raise AssertionError(
+                f"Final-fit receipt has incorrect coverage for {stage}"
+            )
+        if f"stage.{stage}.input_rows_scope" in details:
+            raise AssertionError(
+                "Final Bundle receipt must describe final fits, not OOF aggregates"
+            )
     outputs = dict(result.execution.outputs)
     bundle_ref = BundleRef(
         canonical_uri=outputs["bundle_uri"],
         bundle_id=outputs["bundle_id"],
         manifest_sha256=outputs["manifest_sha256"],
     )
-    return {"bundle": bundle_ref, "fit_metrics": fit_metrics, "outputs": outputs}
+    return {
+        "bundle": bundle_ref,
+        "fit_metrics": fit_metrics,
+        "outputs": outputs,
+        "receipt": receipt,
+    }
 
 
 def _evaluate_bundle(
     bundle: BundleRef,
     evaluation: pd.DataFrame,
     feature_columns: tuple[str, ...],
-) -> CATEEvaluationResult:
+) -> tuple[CATEEvaluationResult, RCTEvaluationResult]:
     loader = BundleModelLoader()
     with loader.open(
         bundle.canonical_uri,
@@ -362,13 +390,44 @@ def _evaluate_bundle(
                 )
             }
         )
-    return evaluate_cate_predictions(
+        # The separate, randomized binary fixture exercises the public RCT API.
+        # It is a protocol check, not a claim about model quality on this cohort.
+        rct_frame = _synthetic_frame(rows=128, seed=27, id_prefix="rct-holdout")
+        rct_values = rct_frame.loc[:, list(FEATURE_COLUMNS)].to_numpy(dtype=np.float32)
+        # ACIC may have more features; this fixture tests the same Bundle schema.
+        if len(feature_columns) != len(FEATURE_COLUMNS):
+            rct_values = (
+                np.random.default_rng(27)
+                .uniform(-1, 1, (128, len(feature_columns)))
+                .astype(np.float32)
+            )
+        rct_prediction = model.predict({"float_input": rct_values})
+        rct_treatment = rct_frame["treatment"].to_numpy()
+        response_probability = np.clip(
+            0.2 + 0.1 * rct_values[:, 0] + 0.2 * rct_treatment, 0.01, 0.99
+        )
+        rct_outcome = np.random.default_rng(37).binomial(1, response_probability)
+        rct_result = evaluate_rct_predictions(
+            prediction_ids=rct_frame["sample_id"].to_numpy(),
+            cate_predictions=rct_prediction["cate"],
+            observation_ids=rct_frame["sample_id"].to_numpy(),
+            treatment=rct_treatment,
+            outcome=rct_outcome,
+            assignment_probability=0.5,
+            experiment_id="deterministic-binary-rct-fixture",
+            policy_coverage=0.25,
+            n_bins=4,
+            n_bootstrap=200,
+            seed=7,
+        )
+    truth_result = evaluate_cate_predictions(
         prediction_ids=evaluation["sample_id"].to_numpy(),
         cate_predictions=prediction["cate"],
         truth_ids=evaluation["sample_id"].to_numpy(),
         mu0=evaluation["mu0"].to_numpy(dtype=np.float64),
         mu1=evaluation["mu1"].to_numpy(dtype=np.float64),
     )
+    return truth_result, rct_result
 
 
 def main() -> None:
@@ -446,7 +505,10 @@ def main() -> None:
         if len(alive_nodes) != 1:
             raise AssertionError(f"expected one live Ray node, got {len(alive_nodes)}")
         result = _run_fit(args.root, train_path, feature_columns, training_rows)
-        metrics = _evaluate_bundle(result["bundle"], evaluation, feature_columns)
+        metrics, rct_metrics = _evaluate_bundle(
+            result["bundle"], evaluation, feature_columns
+        )
+        partition_checks = verify_partitioned_evaluation()
         report = {
             "runtime": {"versions": versions, "ray_image": args.expected_ray_image},
             "cluster": {
@@ -459,8 +521,11 @@ def main() -> None:
                 "evaluation_rows": int(len(evaluation)),
             },
             "bundle": result["outputs"],
+            "execution_receipt": result["receipt"],
             "fit_metrics": result["fit_metrics"],
             "evaluation": metrics,
+            "rct_evaluation": rct_metrics,
+            "partition_checks": partition_checks,
         }
         (args.root / "result.json").write_text(
             json.dumps(report, indent=2, sort_keys=True),

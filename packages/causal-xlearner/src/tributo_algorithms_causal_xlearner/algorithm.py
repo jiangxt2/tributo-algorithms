@@ -17,6 +17,17 @@ from tributo.algorithms.api import (
 from tributo.algorithms.spi import FrameworkNativeAlgorithm
 from tributo_algorithms_boosting import XGBoostStageRunner
 
+from tributo_algorithms_causal_xlearner.metrics import (
+    CATE_COLUMN,
+    CONTRIBUTION_COLUMN,
+    IDENTITY_COLUMN,
+    MU0_COLUMN,
+    MU1_COLUMN,
+    OUTCOME_COLUMN,
+    QUADRANT_COLUMN,
+    TREATMENT_COLUMN,
+    evaluate_xlearner_dataset,
+)
 from tributo_algorithms_causal_xlearner.model import STAGES, XLearnerModel
 
 _STAGE_LABEL = "__tributo_xlearner_label"
@@ -121,22 +132,43 @@ def _pseudo_batch(
     return result
 
 
-def _cate_batch(
+def _score_batch(
     batch: object,
     *,
     feature_names: tuple[str, ...],
+    identity_name: str,
+    treatment_name: str,
+    outcome_name: str,
     booster_raw: Mapping[str, bytes],
+    response_threshold: float,
     propensity_clip: tuple[float, float],
+    treatment_ratio: float,
 ) -> dict[str, object]:
+    import numpy as np
+
     frame = cast(Any, batch)
     model = XLearnerModel.from_raw(
         booster_raw,
         feature_names=feature_names,
-        response_threshold=0.5,
+        response_threshold=response_threshold,
         propensity_clip=propensity_clip,
     )
     prediction = model.predict(frame.loc[:, list(feature_names)].to_numpy())
-    return {"cate": prediction.cate}
+    treatment = frame[treatment_name].to_numpy(dtype=np.int8)
+    outcome = frame[outcome_name].to_numpy(dtype=np.float64)
+    contribution = outcome * (treatment == 1) - (
+        outcome * (treatment == 0) * treatment_ratio
+    )
+    return {
+        IDENTITY_COLUMN: frame[identity_name].to_numpy(),
+        TREATMENT_COLUMN: treatment,
+        OUTCOME_COLUMN: outcome,
+        MU0_COLUMN: prediction.mu0,
+        MU1_COLUMN: prediction.mu1,
+        CATE_COLUMN: prediction.cate,
+        QUADRANT_COLUMN: prediction.quadrant,
+        CONTRIBUTION_COLUMN: contribution,
+    }
 
 
 @dataclass(frozen=True)
@@ -169,6 +201,7 @@ class _XLearnerDriver:
         features = tuple(str(name) for name in data["feature_columns"])
         treatment_name = str(data["treatment_col"])
         outcome_name = str(data["outcome_col"])
+        identity_name = str(data["identity_col"])
         dataset = cast(Any, self.dataset)
         dataset = dataset.map_batches(
             _validate_treatment_batch,
@@ -231,6 +264,7 @@ class _XLearnerDriver:
         clip_value = training.get("propensity_clip", (0.01, 0.99))
         propensity_clip = (float(clip_value[0]), float(clip_value[1]))
         response_threshold = float(training.get("response_threshold", 0.5))
+        treatment_ratio = treated_rows / control_rows
         scored_folds: list[object] = []
         stage_folds: dict[str, list[dict[str, object]]] = {name: [] for name in STAGES}
         stage_digests: dict[str, list[str]] = {name: [] for name in STAGES}
@@ -322,12 +356,17 @@ class _XLearnerDriver:
             raw = {name: stages[name].booster_raw for name in STAGES}
             scored_folds.append(
                 heldout_data.map_batches(
-                    _cate_batch,
+                    _score_batch,
                     batch_format="pandas",
                     fn_kwargs={
                         "feature_names": features,
+                        "identity_name": identity_name,
+                        "treatment_name": treatment_name,
+                        "outcome_name": outcome_name,
                         "booster_raw": raw,
+                        "response_threshold": response_threshold,
                         "propensity_clip": propensity_clip,
+                        "treatment_ratio": treatment_ratio,
                     },
                 )
             )
@@ -343,34 +382,116 @@ class _XLearnerDriver:
                         ]
                     )
                 )
-        cate_mean = float(
-            cast(Any, scored_folds[0]).union(*scored_folds[1:]).mean("cate")
+        oof_scores = cast(Any, scored_folds[0]).union(*scored_folds[1:])
+        metrics = evaluate_xlearner_dataset(
+            oof_scores,
+            rows=rows,
+            treated_rows=treated_rows,
+            control_rows=control_rows,
+            fold_count=fold_count,
         )
+
+        final_stages = {}
+        final_stages["mu0"] = runner.fit(
+            "final-mu0",
+            labelled(control, outcome_name),
+            feature_names=features,
+            label_name=_STAGE_LABEL,
+            params=outcome_params,
+            num_boost_round=rounds,
+        )
+        final_stages["mu1"] = runner.fit(
+            "final-mu1",
+            labelled(treated, outcome_name),
+            feature_names=features,
+            label_name=_STAGE_LABEL,
+            params=outcome_params,
+            num_boost_round=rounds,
+        )
+        final_tau0_data = control.map_batches(
+            _pseudo_batch,
+            batch_format="pandas",
+            fn_kwargs={
+                "feature_names": features,
+                "outcome_name": outcome_name,
+                "booster_raw": final_stages["mu1"].booster_raw,
+                "treated": False,
+            },
+        )
+        final_tau1_data = treated.map_batches(
+            _pseudo_batch,
+            batch_format="pandas",
+            fn_kwargs={
+                "feature_names": features,
+                "outcome_name": outcome_name,
+                "booster_raw": final_stages["mu0"].booster_raw,
+                "treated": True,
+            },
+        )
+        final_stages["tau0"] = runner.fit(
+            "final-tau0",
+            final_tau0_data,
+            feature_names=features,
+            label_name=_STAGE_LABEL,
+            params=effect_params,
+            num_boost_round=rounds,
+        )
+        final_stages["tau1"] = runner.fit(
+            "final-tau1",
+            final_tau1_data,
+            feature_names=features,
+            label_name=_STAGE_LABEL,
+            params=effect_params,
+            num_boost_round=rounds,
+        )
+        final_stages["propensity"] = runner.fit(
+            "final-propensity",
+            labelled(dataset, treatment_name),
+            feature_names=features,
+            label_name=_STAGE_LABEL,
+            params=propensity_params,
+            num_boost_round=rounds,
+        )
+        final_raw = {name: final_stages[name].booster_raw for name in STAGES}
+        final_digests = {
+            name: str(
+                cast(Mapping[str, Any], final_stages[name].evidence["state"])[
+                    "global_model_digest"
+                ]
+            )
+            for name in STAGES
+        }
         stage_evidence = {
             name: {
-                "workers": stage_folds[name][0]["workers"],
-                "state": stage_folds[name][0]["state"],
+                "workers": final_stages[name].evidence["workers"],
+                "state": final_stages[name].evidence["state"],
                 "input_complete": True,
-                "expected_training_rows": rows,
-                "cross_fit_folds": stage_folds[name],
+                "expected_training_rows": final_stages[name].row_count,
+                "evaluation_cross_fit_folds": stage_folds[name],
+                "final_fit": dict(final_stages[name].evidence),
             }
             for name in STAGES
         }
         composition_digest = hashlib.sha256(
-            json.dumps(stage_digests, sort_keys=True, separators=(",", ":")).encode()
+            json.dumps(
+                {
+                    "cross_fit": stage_digests,
+                    "final": final_digests,
+                    "features": features,
+                    "propensity_clip": propensity_clip,
+                    "response_threshold": response_threshold,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
         ).hexdigest()
         return XLearnerResult(
-            booster_raw=raw,
+            booster_raw=final_raw,
             stage_evidence=stage_evidence,
             feature_names=features,
             response_threshold=response_threshold,
             propensity_clip=propensity_clip,
-            metrics={
-                "ate": cate_mean,
-                "treated_rows": treated_rows,
-                "control_rows": control_rows,
-                "cross_fit_folds": fold_count,
-            },
+            metrics=metrics,
             composition_digest=composition_digest,
         )
 

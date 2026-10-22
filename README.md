@@ -217,10 +217,44 @@ or execution profiles.
 
 ## X-Learner held-out effect evaluation
 
+`evaluate_cate_predictions` and `evaluate_rct_predictions` are public, model-independent functions exported by `tributo_algorithms_causal_xlearner`. They consume predictions from an already trained Bundle and do not train, read files, start Ray, or publish a model. Prediction and truth/observation IDs must be unique and cover exactly the same cohort.
+
+For binary-outcome randomized experiments, use the known constant treatment-assignment probability and a policy fixed before looking at the test outcomes:
+
+```python
+from tributo_algorithms_causal_xlearner import evaluate_rct_predictions
+
+report = evaluate_rct_predictions(
+    prediction_ids=prediction_ids,
+    cate_predictions=predicted_cate,
+    observation_ids=observation_ids,
+    treatment=observed_treatment,
+    outcome=observed_visit,
+    assignment_probability=0.5,
+    experiment_id="hillstrom-womens-email-vs-no-email",
+    policy_coverage=0.2,
+    n_bins=10,
+    confidence_level=0.95,
+    n_bootstrap=200,
+    seed=7,
+)
+```
+
+Declaring an experiment ID does not verify randomization. Do not substitute learned propensity scores or apply this RCT interpretation to observational ACIC assignments. Dataset selection, treatment direction, and the source's randomization design remain the caller's responsibility.
+
+The `rct-ipw-v1` result contains cohort counts, metric definitions and units, uplift bins, curve data, policy values, and intervals. With known probability `p`, the contribution is `T*Y/p - (1-T)*Y/(1-p)`. Sort by decreasing predicted CATE and ascending sample ID; the cumulative curve at rank `k` is the sum of its first `k` contributions divided by the full cohort size. `auuc_ipw` integrates every rank, including the origin, against coverage. `qini_ipw` integrates the signed difference from the line joining the origin and full-cohort endpoint. Both are unnormalized outcome-probability areas. Zero and negative gain are valid; no division by net gain occurs. The IPW endpoint and the unweighted treatment/control mean difference are reported separately and need not coincide.
+
+Exactly one of `policy_coverage` and `policy_threshold` is required. Coverage chooses `floor(n * coverage)` customers with ID tie-breaking; thresholds choose CATE greater than or equal to the threshold. Values use inverse-probability weighting and compare with no treatment, all treatment, and random treatment at the policy's realized coverage. Customer bootstrap preserves treatment-arm counts and the original policy actions; it never refits, reranks, or selects a new policy. Percentile intervals cover ATE and policy statistics; bins have separate within-bin, within-arm intervals when each arm has at least two observations. Insufficient bins remain present with an explicit status and null interval. There are no simultaneous curve/area intervals or training-uncertainty claims.
+
+The public RCT function accepts at most 100,000 rows, 100 bins, and 1,000 bootstrap resamples (minimum two). It requires at least two observations per arm, consistent string or integer ID types, finite scores, binary treatment and outcomes, and valid probabilities. It rejects bad rows rather than silently dropping them. Results are JSON-serializable; applications may render the returned curves without implementing metric mathematics.
+
+Training retains separate descriptive OOF diagnostics under `xlearner-oof-normalized-v1`. Their `qini`/`auuc` use an empirical arm ratio and a binary reference normalization, not the held-out IPW definitions; `metric_status` identifies zero-normalizer legacy fallbacks. The full-cohort endpoint and AUUC denominator use the same gain computed from arm-level outcome totals; a tolerance of eight ULPs at the arm-total scale treats cancellation residuals as zero without a fixed absolute cutoff. The `normalization` object reports the unrounded `full_cohort_gain` and `zero_tolerance`; zero gain retains the numeric AUUC fallback 0.5 with `undefined_zero_normalizer` status, rather than presenting that fallback as a valid estimate. These diagnostics do not establish randomization or validate observational causal effects. Model output names, the CATE formula, response/uplift quadrant labels and codes, native flavor, and ONNX contract remain compatible with the mainline implementation. The final Bundle uses a five-stage refit on the full training input; held-out effect validation remains separate from OOF diagnostics.
+
 PR CI runs the installed aggregate Wheel through a single-node Ray Jobs smoke
 using a deterministic truth-known fixture. The smoke exercises X-Learner fit,
 loads its Bundle through the batch prediction capability, and reports
 unnormalized root PEHE and absolute population ATE error on a held-out cohort.
+The same Job calls the public RCT evaluator on a separate binary experiment fixture and checks the ordered OOF scan against shuffled input and 1/3/7 physical-block layouts, including repeated keys. These checks run in the Docker Ray Job, without an opt-in skipped local-Ray test. They do not claim validation on the Hillstrom data itself.
 
 The manual ACIC 2016 Gate uses a prepared CSV or Parquet file that is not
 committed to the repository. It must contain unique `sample_id`, binary

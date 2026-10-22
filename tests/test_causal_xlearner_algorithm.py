@@ -28,6 +28,23 @@ from tributo_algorithms_causal_xlearner.algorithm import (
 from tributo_algorithms_causal_xlearner.contracts import XLearnerConfigValidator
 from tributo_algorithms_causal_xlearner.exporter import XLearnerONNXExporter
 from tributo_algorithms_causal_xlearner.flavor import XLearnerFlavor
+from tributo_algorithms_causal_xlearner.metrics import (
+    _PREFIX_RECORD,
+    _RECORD_TYPE_COLUMN,
+    _SUMMARY_RECORD,
+    CATE_COLUMN,
+    CONTRIBUTION_COLUMN,
+    IDENTITY_COLUMN,
+    MU0_COLUMN,
+    MU1_COLUMN,
+    OUTCOME_COLUMN,
+    QUADRANT_COLUMN,
+    TREATMENT_COLUMN,
+    _attach_stable_tie_breaker,
+    _build_report,
+    _OrderedMetricScan,
+    _summarize_batch,
+)
 from tributo_algorithms_causal_xlearner.model import (
     FORMULA,
     QUADRANT_CODES,
@@ -387,4 +404,370 @@ def test_xlearner_treatment_validation_rejects_missing_column() -> None:
     with pytest.raises(ValueError, match="column.*missing"):
         _validate_treatment_batch(
             pd.DataFrame({"outcome": [1.0]}), treatment_name="treatment"
+        )
+
+
+class _Booster:
+    def __init__(self, values: list[float]) -> None:
+        self.values = np.asarray(values, dtype=np.float32)
+
+    def predict(self, _matrix: object) -> np.ndarray:
+        return self.values
+
+
+def test_xlearner_quadrants_preserve_response_uplift_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+    from types import SimpleNamespace
+
+    monkeypatch.setitem(
+        sys.modules,
+        "xgboost",
+        SimpleNamespace(DMatrix=lambda values, **_kwargs: values),
+    )
+    model = XLearnerModel(
+        {
+            "mu0": _Booster([0.1, 0.1, 0.8, 0.8]),
+            "mu1": _Booster([0.2, 0.2, 0.9, 0.9]),
+            "tau0": _Booster([-0.2, 0.2, -0.2, 0.2]),
+            "tau1": _Booster([-0.2, 0.2, -0.2, 0.2]),
+            "propensity": _Booster([0.5, 0.5, 0.5, 0.5]),
+        },
+        feature_names=("x0",),
+        response_threshold=0.5,
+        propensity_clip=(0.01, 0.99),
+    )
+
+    result = model.predict(np.arange(4, dtype=np.float32).reshape(-1, 1))
+
+    assert result.quadrant.tolist() == [
+        "low_response_low_uplift",
+        "low_response_high_uplift",
+        "high_response_low_uplift",
+        "high_response_high_uplift",
+    ]
+    assert QUADRANT_CODES == {
+        "low_response_low_uplift": 0,
+        "low_response_high_uplift": 1,
+        "high_response_low_uplift": 2,
+        "high_response_high_uplift": 3,
+    }
+
+
+def test_xlearner_report_contains_complete_uplift_evaluation() -> None:
+    summary: dict[str, object] = {
+        "treated_outcome_sum": 1.0,
+        "control_outcome_sum": 1.0,
+        "positive_contribution_count": 1,
+        "zero_contribution_count": 2,
+        "negative_contribution_count": 1,
+    }
+    for name, treatment, outcome in (
+        ("low_response_high_uplift", 1, 1),
+        ("high_response_high_uplift", 0, 0),
+        ("low_response_low_uplift", 1, 0),
+        ("high_response_low_uplift", 0, 1),
+    ):
+        summary[f"quadrant.{name}.count"] = 1
+        summary[f"quadrant.{name}.treated_count"] = treatment
+        summary[f"quadrant.{name}.control_count"] = 1 - treatment
+        summary[f"quadrant.{name}.treated_outcome_sum"] = outcome if treatment else 0
+        summary[f"quadrant.{name}.control_outcome_sum"] = (
+            outcome if not treatment else 0
+        )
+    prefixes = {
+        1: {
+            "gain": 1.0,
+            "cate_sum": 0.4,
+            "treated_count": 1.0,
+            "control_count": 0.0,
+            "treated_outcome_sum": 1.0,
+            "control_outcome_sum": 0.0,
+        },
+        2: {
+            "gain": 1.0,
+            "cate_sum": 0.6,
+            "treated_count": 1.0,
+            "control_count": 1.0,
+            "treated_outcome_sum": 1.0,
+            "control_outcome_sum": 0.0,
+        },
+        3: {
+            "gain": 1.0,
+            "cate_sum": 0.5,
+            "treated_count": 2.0,
+            "control_count": 1.0,
+            "treated_outcome_sum": 1.0,
+            "control_outcome_sum": 0.0,
+        },
+        4: {
+            "gain": 0.0,
+            "cate_sum": 0.2,
+            "treated_count": 2.0,
+            "control_count": 2.0,
+            "treated_outcome_sum": 1.0,
+            "control_outcome_sum": 1.0,
+        },
+    }
+
+    report = _build_report(
+        summaries=[summary],
+        prefixes=prefixes,
+        rows=4,
+        treated_rows=2,
+        control_rows=2,
+        fold_count=2,
+        n_points=5,
+        n_bins=2,
+    )
+
+    assert report["ate"] == 0.05
+    assert report["upliftCurve"]["modelGain"] == [0.0, 1.0, 1.0, 1.0, 0.0]
+    assert report["evaluation"] == {
+        "method": "cross_fitted_oof",
+        "sampleSize": 4,
+    }
+    assert report["calibration"]["points"] == [
+        {"predicted": -0.2, "actual": -1.0, "count": 2, "valid": True},
+        {"predicted": 0.3, "actual": 1.0, "count": 2, "valid": True},
+    ]
+    assert [segment["label"] for segment in report["quadrant"]["segments"]] == [
+        0,
+        1,
+        2,
+        3,
+    ]
+    assert [segment["type"] for segment in report["quadrant"]["segments"]] == list(
+        QUADRANT_CODES
+    )
+    assert report["metric_version"] == "xlearner-oof-normalized-v1"
+    assert report["metric_status"]["auuc"] == "undefined_zero_normalizer"
+
+
+def _metric_row(
+    *,
+    identity: int,
+    cate: float,
+    treatment: int,
+    outcome: float,
+    contribution: float,
+    quadrant: str,
+) -> dict[str, object]:
+    return {
+        IDENTITY_COLUMN: identity,
+        TREATMENT_COLUMN: treatment,
+        OUTCOME_COLUMN: outcome,
+        MU0_COLUMN: 0.1,
+        MU1_COLUMN: 0.9,
+        CATE_COLUMN: cate,
+        QUADRANT_COLUMN: quadrant,
+        CONTRIBUTION_COLUMN: contribution,
+    }
+
+
+def test_oof_summary_identifies_continuous_outcomes_for_binary_reference() -> None:
+    frame = pd.DataFrame(
+        [
+            _metric_row(
+                identity=1,
+                cate=0.1,
+                treatment=1,
+                outcome=1.5,
+                contribution=1.5,
+                quadrant="low_response_high_uplift",
+            ),
+            _metric_row(
+                identity=2,
+                cate=-0.1,
+                treatment=0,
+                outcome=0.0,
+                contribution=0.0,
+                quadrant="low_response_low_uplift",
+            ),
+        ]
+    )
+    assert _summarize_batch(frame)["non_binary_outcome_count"] == 1
+
+
+def test_xlearner_tie_breaker_is_stable_across_input_order() -> None:
+    import pandas as pd
+
+    rows = [
+        _metric_row(
+            identity=7,
+            cate=0.5,
+            treatment=0,
+            outcome=0.0,
+            contribution=0.0,
+            quadrant="low_response_low_uplift",
+        ),
+        _metric_row(
+            identity=7,
+            cate=0.5,
+            treatment=1,
+            outcome=1.0,
+            contribution=1.0,
+            quadrant="low_response_high_uplift",
+        ),
+        _metric_row(
+            identity=7,
+            cate=0.5,
+            treatment=0,
+            outcome=1.0,
+            contribution=-1.0,
+            quadrant="high_response_low_uplift",
+        ),
+    ]
+    forward = _attach_stable_tie_breaker(pd.DataFrame(rows))
+    reverse = _attach_stable_tie_breaker(pd.DataFrame(list(reversed(rows))))
+    sort_columns = [
+        CATE_COLUMN,
+        IDENTITY_COLUMN,
+        "__tributo_xlearner_tie_breaker_high",
+        "__tributo_xlearner_tie_breaker_low",
+    ]
+
+    forward = forward.sort_values(sort_columns).reset_index(drop=True)
+    reverse = reverse.sort_values(sort_columns).reset_index(drop=True)
+    pd.testing.assert_frame_equal(forward, reverse)
+
+
+def test_xlearner_ordered_scan_is_linear_for_many_identical_physical_blocks() -> None:
+    import pandas as pd
+
+    block_rows = 32
+    block_count = 128
+    total_rows = block_rows * block_count
+    frame = pd.DataFrame(
+        [
+            _metric_row(
+                identity=1,
+                cate=0.5,
+                treatment=1,
+                outcome=1.0,
+                contribution=1.0,
+                quadrant="low_response_high_uplift",
+            ),
+        ]
+        * block_rows
+    )
+    scan = _OrderedMetricScan(target_ranks=list(range(1, total_rows + 1)))
+    outputs = [scan(frame) for _ in range(block_count)]
+
+    emitted_rows = sum(len(output) for output in outputs)
+    prefix_ranks = [
+        int(record["rank"])
+        for output in outputs
+        for record in output.to_dict("records")
+        if record[_RECORD_TYPE_COLUMN] == _PREFIX_RECORD
+    ]
+    summary_count = sum(
+        int((output[_RECORD_TYPE_COLUMN] == _SUMMARY_RECORD).sum())
+        for output in outputs
+    )
+    assert emitted_rows == total_rows + block_count
+    assert prefix_ranks == list(range(1, total_rows + 1))
+    assert summary_count == block_count
+    assert outputs[-1]["gain"].iloc[-1] == total_rows
+
+
+def _normalization_report(
+    treatment: list[int], outcome: list[float], *, batch_size: int
+) -> dict[str, Any]:
+    """Feed actual prefix-scan records into reporting without starting Ray."""
+    rows = len(treatment)
+    treated_rows = sum(treatment)
+    control_rows = rows - treated_rows
+    ratio = treated_rows / control_rows
+    frame = pd.DataFrame(
+        [
+            _metric_row(
+                identity=index,
+                cate=float(rows - index),
+                treatment=assigned,
+                outcome=response,
+                contribution=response if assigned else -ratio * response,
+                quadrant="low_response_high_uplift",
+            )
+            for index, (assigned, response) in enumerate(zip(treatment, outcome))
+        ]
+    )
+    scan = _OrderedMetricScan(target_ranks=list(range(1, rows + 1)))
+    records = [
+        row
+        for start in range(0, rows, batch_size)
+        for row in scan(frame.iloc[start : start + batch_size]).to_dict("records")
+    ]
+    summaries = [row for row in records if row[_RECORD_TYPE_COLUMN] == _SUMMARY_RECORD]
+    prefixes = {
+        int(row["rank"]): row
+        for row in records
+        if row[_RECORD_TYPE_COLUMN] == _PREFIX_RECORD
+    }
+    return _build_report(
+        summaries=summaries,
+        prefixes=prefixes,
+        rows=rows,
+        treated_rows=treated_rows,
+        control_rows=control_rows,
+        fold_count=2,
+        n_points=rows + 1,
+        n_bins=2,
+    )
+
+
+@pytest.mark.parametrize("batch_size", [1, 3, 32])
+@pytest.mark.parametrize("treated_rows,control_rows", [(1, 3), (4, 12), (3, 1), (2, 2)])
+@pytest.mark.parametrize("constant_outcome", [0.0, 1.0])
+def test_oof_zero_net_gain_has_undefined_auuc_across_batch_layouts(
+    batch_size: int, treated_rows: int, control_rows: int, constant_outcome: float
+) -> None:
+    rows = treated_rows + control_rows
+    report = _normalization_report(
+        [1] * treated_rows + [0] * control_rows,
+        [constant_outcome] * rows,
+        batch_size=batch_size,
+    )
+    # Every arm has the same outcome: exact net gain is zero for any ratio.
+    assert report["auuc"] == 0.5
+    assert report["metric_status"]["auuc"] == "undefined_zero_normalizer"
+    assert report["upliftCurve"]["modelGain"][-1] == 0.0
+    assert report["upliftCurve"]["randomGain"] == [0.0] * (rows + 1)
+
+
+@pytest.mark.parametrize("batch_size", [1, 3, 32])
+@pytest.mark.parametrize(
+    "outcome,gain,auuc",
+    [
+        ([1.0, 0.0, 0.0, 0.0], 1.0, 0.875),
+        ([0.0, 1.0, 1.0, 1.0], -1.0, 0.375),
+        ([1e-20, 0.0, 0.0, 0.0], 1e-20, 0.875),
+    ],
+)
+def test_oof_nonzero_gain_preserves_scale_and_normalized_area(
+    batch_size: int, outcome: list[float], gain: float, auuc: float
+) -> None:
+    report = _normalization_report([1, 0, 0, 0], outcome, batch_size=batch_size)
+    assert report["metric_status"]["auuc"] == "ok"
+    assert report["auuc"] == auuc
+    assert report["normalization"]["full_cohort_gain"] == gain
+    assert report["normalization"]["zero_tolerance"] < abs(gain)
+
+
+@pytest.mark.parametrize("extra_response,undefined", [(4e-16, True), (1e-12, False)])
+def test_oof_zero_test_is_relative_to_the_outcome_total_scale(
+    extra_response: float, undefined: bool
+) -> None:
+    report = _normalization_report(
+        [1, 0, 0, 0], [1.0 + extra_response, 1.0, 1.0, 1.0], batch_size=4
+    )
+    if undefined:
+        assert report["metric_status"]["auuc"] == "undefined_zero_normalizer"
+        assert report["auuc"] == 0.5
+        assert report["normalization"]["full_cohort_gain"] == 0.0
+    else:
+        assert report["metric_status"]["auuc"] == "ok"
+        assert (
+            report["normalization"]["full_cohort_gain"] == (1.0 + extra_response) - 1.0
         )

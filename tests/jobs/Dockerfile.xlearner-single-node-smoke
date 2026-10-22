@@ -21,5 +21,6 @@ RUN python -m pip install --require-hashes -r /tmp/xlearner-smoke-requirements.t
     python -m pip check
 
 COPY tests/jobs/xlearner_single_node_smoke.py /opt/tributo-smoke/
+COPY tests/jobs/xlearner_evaluation_checks.py /opt/tributo-smoke/
 
 USER ray

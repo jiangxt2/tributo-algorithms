@@ -7,6 +7,14 @@ from typing import Any
 from tributo_algorithms_causal_xlearner.descriptor import X_LEARNER_DESCRIPTOR
 
 _LAZY_EXPORTS = {
+    "evaluate_rct_predictions": (
+        "tributo_algorithms_causal_xlearner.rct_metrics",
+        "evaluate_rct_predictions",
+    ),
+    "RCTEvaluationResult": (
+        "tributo_algorithms_causal_xlearner.rct_metrics",
+        "RCTEvaluationResult",
+    ),
     "DistributedXLearner": (
         "tributo_algorithms_causal_xlearner.algorithm",
         "DistributedXLearner",
@@ -40,4 +48,6 @@ __all__ = [
     "X_LEARNER_DESCRIPTOR",
     "CATEEvaluationResult",
     "evaluate_cate_predictions",
+    "RCTEvaluationResult",
+    "evaluate_rct_predictions",
 ]
