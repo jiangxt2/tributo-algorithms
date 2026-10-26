@@ -153,7 +153,7 @@ ensure_image() {
     source="$image"
   fi
   "${DOCKER[@]}" image inspect --format '{{join .RepoDigests "\n"}}' "$source" | \
-    rg --fixed-strings -- "$digest" >>"$TRIBUTO_E2E_EVIDENCE/image-prepare.log"
+    grep -F -- "$digest" >>"$TRIBUTO_E2E_EVIDENCE/image-prepare.log"
   expected_id="$("${DOCKER[@]}" image inspect --format '{{.Id}}' "$source")"
   if [[ "$pulled" == 1 ]]; then
     actual_id="$("${DOCKER[@]}" image inspect --format '{{.Id}}' "${source%%@*}")"

@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -598,6 +599,14 @@ def test_fresh_and_reused_training_share_the_same_validation(
 def test_pinned_image_repairs_a_stale_local_alias(
     tmp_path: Path, mismatch: bool | str
 ) -> None:
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    for name in ("bash", "grep"):
+        executable = shutil.which(name)
+        assert executable is not None
+        (tools / name).symlink_to(executable)
+    (tools / "python3").symlink_to(sys.executable)
+    assert shutil.which("rg", path=str(tools)) is None
     script = (Path(__file__).parent / "jobs/run_pytorch_e2e.sh").read_text()
     function = re.search(
         r"^ensure_image\(\) \{.*?^\}", script, re.MULTILINE | re.DOTALL
@@ -635,6 +644,7 @@ def test_pinned_image_repairs_a_stale_local_alias(
         ["bash", "-c", command, "verify", str(tmp_path), pinned],
         capture_output=True,
         text=True,
+        env={**os.environ, "PATH": str(tools)},
     )
     assert (result.returncode != 0) == (
         mismatch is True or mismatch in {"tagless", "mirror_mismatch"}
