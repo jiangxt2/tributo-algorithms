@@ -74,9 +74,16 @@ def _model(
             padding_mask = tokens.eq(0)
             if bool(padding_mask.all(dim=1).any()):
                 raise ValueError("Transformer rows must contain a non-padding token")
-            encoded = self.encoder(
-                self.embedding(tokens), src_key_padding_mask=padding_mask
-            )
+            embedded = self.embedding(tokens)
+            if tokens.shape[0] == 0:
+                # Exhausted DDP ranks still need every parameter's backward hook.
+                # Embedding and output retain their ordinary zero-row graphs;
+                # attention cannot reshape its zero-row padding mask.
+                zero = embedded.sum()
+                for parameter in self.encoder.parameters():
+                    zero = zero + parameter.reshape(-1)[:1].sum() * 0.0
+                return self.output(embedded.sum(dim=1)) + zero
+            encoded = self.encoder(embedded, src_key_padding_mask=padding_mask)
             valid = (~padding_mask).to(encoded.dtype).unsqueeze(-1)
             pooled = (encoded * valid).sum(dim=1) / valid.sum(dim=1).clamp_min(1.0)
             return self.output(pooled)
