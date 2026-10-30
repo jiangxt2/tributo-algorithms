@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from typing import cast
 
 import pytest
 import torch
@@ -15,6 +16,7 @@ from tributo.algorithms import (
     TorchStageRunIdentity,
     TorchStepContext,
 )
+from tributo.algorithms.api.torch_runtime import TorchLossContribution
 from tributo_algorithms_transformers_nlp import TOKEN_TRANSFORMER_DESCRIPTOR
 from tributo_algorithms_transformers_nlp.recipe import TokenTransformerRecipe
 
@@ -133,3 +135,58 @@ def test_transformer_rejects_fractional_accumulation() -> None:
     modules = recipe.build_modules(build)
     with pytest.raises(ValueError, match="gradient_accumulation_steps"):
         recipe.configure_optimizers(modules, build)
+
+
+@pytest.mark.parametrize("training", [True, False])
+@pytest.mark.parametrize("columnar", [True, False])
+def test_empty_transformer_batch_has_zero_contributions_and_all_parameter_gradients(
+    training: bool, columnar: bool
+) -> None:
+    recipe = TokenTransformerRecipe()
+    build = _context()
+    modules = recipe.build_modules(build)
+    model = cast(torch.nn.Module, modules["model"])
+    model.train(training)
+    features = (
+        ("token_0", "token_1", "token_2", "token_3") if columnar else ("input_ids",)
+    )
+    raw = (
+        {name: torch.empty(0, dtype=torch.int64) for name in features}
+        if columnar
+        else {"input_ids": torch.empty((0, 4), dtype=torch.int64)}
+    )
+    raw["label"] = torch.empty(0, dtype=torch.float32)
+    batch = recipe.adapt_batch(
+        raw, TorchBatchContext(build.stage, features, label_name="label")
+    )
+    step = recipe.training_step if training else recipe.validation_step
+    result = step(modules, batch, TorchStepContext(build.stage, 0, 0))
+    assert isinstance(result.loss, TorchLossContribution)
+    output = cast(torch.Tensor, result.outputs["output"])
+    numerator = cast(torch.Tensor, result.loss.numerator)
+    assert output.shape == (0, 1) and output.requires_grad
+    assert batch.local_rows == result.loss.normalizer == 0
+    assert numerator.item() == 0.0 and numerator.requires_grad
+    assert result.metrics["accuracy"].numerator == 0
+    assert result.metrics["accuracy"].normalizer == 0
+    numerator.backward()
+    for name, parameter in model.named_parameters():
+        assert parameter.grad is not None, name
+        assert torch.isfinite(parameter.grad).all(), name
+        assert torch.count_nonzero(parameter.grad) == 0, name
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bool])
+def test_empty_transformer_batch_still_rejects_invalid_token_dtype(
+    dtype: torch.dtype,
+) -> None:
+    recipe = TokenTransformerRecipe()
+    build = _context()
+    with pytest.raises(ValueError, match="integer values"):
+        recipe.adapt_batch(
+            {
+                "input_ids": torch.empty((0, 4), dtype=dtype),
+                "label": torch.empty(0),
+            },
+            TorchBatchContext(build.stage, ("input_ids",), label_name="label"),
+        )
