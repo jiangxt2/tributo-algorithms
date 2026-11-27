@@ -168,6 +168,8 @@ class OfficialXGBoostONNXExporter:
         target: PlannedTarget,
     ) -> ArtifactDraft:
         del upstream
+        import numpy as np
+        import onnx
         import onnxmltools
         import xgboost
         from onnxmltools.convert.common.data_types import FloatTensorType
@@ -180,18 +182,60 @@ class OfficialXGBoostONNXExporter:
         # A raw Booster is classified heuristically from its cover values by
         # ONNXMLTools. A short best prefix can have integral covers even for
         # classification, so preserve the declared objective explicitly.
-        objective = json.loads(booster.save_config())["learner"]["objective"]["name"]
+        learner = json.loads(booster.save_config())["learner"]
+        objective = learner["objective"]["name"]
         model: Any = (
             xgboost.XGBClassifier()
             if objective.startswith(("binary:", "multi:"))
             else xgboost.XGBRegressor()
         )
         model.load_model(bytearray(booster.save_raw(raw_format="ubj")))
+        raw_base_score = json.loads(learner["learner_model_param"]["base_score"])
+        base_scores = (
+            raw_base_score if isinstance(raw_base_score, list) else [raw_base_score]
+        )
+        boundary_margin: float | None = None
+        if objective == "binary:logistic" and base_scores in ([0], [1]):
+            # Ask XGBoost for its own initial margin; its boundary handling
+            # differs across versions and from the converter's direct logit.
+            probe = xgboost.DMatrix(np.zeros((1, feature_count), dtype=np.float32))
+            initial = xgboost.train(
+                {"objective": objective, "base_score": base_scores[0], "nthread": 1},
+                probe,
+                num_boost_round=0,
+            )
+            boundary_margin = float(initial.predict(probe, output_margin=True)[0])
+            model.get_booster().set_param({"base_score": 0.5})
         converted = onnxmltools.convert_xgboost(
             model,
             initial_types=[("float_input", FloatTensorType([None, feature_count]))],
             target_opset=int(target.typed_options.get("opset", 15)),
         )
+        if boundary_margin is not None:
+            classifiers = [
+                node
+                for node in converted.graph.node
+                if node.domain == "ai.onnx.ml"
+                and node.op_type == "TreeEnsembleClassifier"
+            ]
+            if len(classifiers) != 1 or not math.isfinite(boundary_margin):
+                raise ValueError("XGBoost ONNX classifier base margin is invalid")
+            classifier = classifiers[0]
+            attributes = [
+                attr for attr in classifier.attribute if attr.name != "base_values"
+            ]
+            del classifier.attribute[:]
+            classifier.attribute.extend(attributes)
+            classifier.attribute.append(
+                onnx.helper.make_attribute("base_values", [boundary_margin])
+            )
+        if objective == "reg:squarederror":
+            output = converted.graph.output[0]
+            if output.name != "prediction":
+                converted.graph.node.append(
+                    onnx.helper.make_node("Identity", [output.name], ["prediction"])
+                )
+                output.name = "prediction"
         converted.graph.name = "tributo-official-xgboost"
         if feature_names:
             feature_property = converted.metadata_props.add()

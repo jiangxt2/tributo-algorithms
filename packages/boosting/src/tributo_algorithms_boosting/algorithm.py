@@ -750,9 +750,28 @@ def export_result(
                     if key != "schema_version"
                 }
             )
-        feature_names = tuple(
-            json.loads((root / "feature_names.json").read_text(encoding="utf-8"))
-        )
+        try:
+            raw_feature_names = json.loads(
+                (root / "feature_names.json").read_text(encoding="utf-8")
+            )
+            if not isinstance(raw_feature_names, list) or not all(
+                isinstance(name, str) and name for name in raw_feature_names
+            ):
+                raise ValueError("invalid feature names")
+            feature_names = tuple(raw_feature_names)
+            if (
+                feature_names != plan.primary_input_binding.feature_names
+                or len(feature_names) != booster.num_features()
+                or (
+                    booster.feature_names is not None
+                    and tuple(booster.feature_names) != feature_names
+                )
+            ):
+                raise ValueError("feature names or count differ")
+        except (OSError, ValueError) as exc:
+            raise AlgorithmExecutionError(
+                "XGBoost checkpoint features do not match the training binding or model"
+            ) from exc
         learner = json.loads(booster.save_config())["learner"]
         objective = str(learner["objective"]["name"])
         classification = objective.startswith(("binary:", "multi:"))
