@@ -72,11 +72,16 @@ def _train_loop(config: dict[str, Any]) -> None:
     feature_names = list(config["feature_names"])
     label_name = str(config["label_name"])
     training = {"num_rounds": config["num_boost_round"]}
-    for key in ("early_stopping_rounds", "maximize", "checkpoint_interval_rounds"):
+    for key in (
+        "early_stopping_rounds",
+        "maximize",
+        "selection_metric",
+        "checkpoint_interval_rounds",
+    ):
         if key in config:
             training[key] = config[key]
     try:
-        rounds, patience, maximize = _validate_training_options(
+        rounds, patience, maximize, selection_metric = _validate_training_options(
             training, config["params"]
         )
         interval, _ = _validate_recovery_options(training, {}, config["params"])
@@ -148,6 +153,7 @@ def _train_loop(config: dict[str, Any]) -> None:
                     rounds=rounds,
                     patience=patience,
                     maximize=maximize,
+                    selection_metric=selection_metric,
                 )
 
     def periodic_report(model: Any, state: Any) -> None:
@@ -192,6 +198,7 @@ def _train_loop(config: dict[str, Any]) -> None:
                     dtrain=matrices["train"],
                     patience=patience,
                     maximize=maximize,
+                    selection_metric=selection_metric,
                     interval=interval,
                     restored=restored,
                     report=periodic_report,
@@ -202,6 +209,7 @@ def _train_loop(config: dict[str, Any]) -> None:
                     xgboost.callback.EarlyStopping(
                         rounds=patience,
                         data_name="validation",
+                        metric_name=selection_metric,
                         maximize=maximize,
                         save_best=True,
                     )
@@ -239,11 +247,10 @@ def _train_loop(config: dict[str, Any]) -> None:
                     if state is not None
                     else history.get("validation", {})
                 )
-                if len(validation_history) != 1:
-                    raise AlgorithmExecutionError(
-                        "XGBoost selection metric is ambiguous"
-                    )
-                metric, scores = next(iter(validation_history.items()))
+                if selection_metric not in validation_history:
+                    raise AlgorithmExecutionError("XGBoost selection metric is missing")
+                metric = selection_metric
+                scores = validation_history[metric]
                 if not scores or any(not math.isfinite(score) for score in scores):
                     raise AlgorithmExecutionError(
                         "XGBoost selection scores must be finite"
@@ -470,7 +477,9 @@ class DistributedXGBoost(FrameworkNativeAlgorithm):
         training = cast(Mapping[str, Any], config.get("training", {}))
         ray_config = cast(Mapping[str, Any], config.get("ray", {}))
         binding = self.plan.primary_input_binding
-        rounds, patience, maximize = _validate_training_options(training, model)
+        rounds, patience, maximize, selection_metric = _validate_training_options(
+            training, model
+        )
         interval, failures = _validate_recovery_options(training, ray_config, model)
         self.invocation = uuid4().hex
         collector_type = ray.remote(_EvidenceCollector).options(num_cpus=0)
@@ -493,7 +502,11 @@ class DistributedXGBoost(FrameworkNativeAlgorithm):
                     else {}
                 ),
                 **(
-                    {"early_stopping_rounds": patience, "maximize": maximize}
+                    {
+                        "early_stopping_rounds": patience,
+                        "maximize": maximize,
+                        "selection_metric": selection_metric,
+                    }
                     if patience is not None
                     else {}
                 ),
@@ -683,12 +696,17 @@ def export_result(
                 },
                 plan.runtime.worker_count,
             )
+            _, _, _, selection_metric = _validate_training_options(
+                training,
+                cast(Mapping[str, Any], plan.algorithm_config.get("model", {})),
+            )
             _, recovery = read_checkpoint(
                 root,
                 identity=identity,
                 rounds=training.get("num_rounds", 10),
                 patience=training.get("early_stopping_rounds"),
                 maximize=training.get("maximize"),
+                selection_metric=selection_metric,
             )
             if (
                 recovery["phase"] != "final"

@@ -17,7 +17,11 @@ import xgboost
 from ray import train
 from tributo.algorithms.api import AlgorithmExecutionError
 from tributo_algorithms_boosting import algorithm, stages
-from tributo_algorithms_boosting.checkpointing import REPORT_KEY
+from tributo_algorithms_boosting.checkpointing import (
+    REPORT_KEY,
+    read_checkpoint,
+    recovery_identity,
+)
 
 
 class _Shard:
@@ -298,6 +302,69 @@ def test_fixed_round_training_accepts_frozen_multiple_metrics(
     assert np.isfinite(reports[0]["metrics"]["train-auc"])
 
 
+@pytest.mark.parametrize("metrics", [("logloss", "auc"), ("auc", "logloss")])
+def test_multiple_metrics_select_logloss_best_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, metrics: tuple[str, str]
+) -> None:
+    rng = np.random.default_rng(0)
+    values = rng.normal(size=(200, 4))
+    labels = (values[:, 0] + rng.normal(size=200) * 1.1 > 0).astype(int)
+    frame = pd.DataFrame(values, columns=["b", "a", "c", "d"])
+    frame["label"] = labels
+    training, validation = frame.iloc[:130], frame.iloc[130:]
+    _, evidence, reports = _worker(
+        monkeypatch, tmp_path, training, validation=_Shard(validation)
+    )
+    monkeypatch.setattr(algorithm, "_XGBOOST_BATCH_ROWS", 512)
+    config = _config(evidence)
+    config.update(
+        feature_names=["b", "a", "c", "d"],
+        input_roles=["train", "validation"],
+        num_boost_round=30,
+        early_stopping_rounds=5,
+        maximize=False,
+        selection_metric="logloss",
+    )
+    config["params"].update(eval_metric=metrics, max_depth=2, eta=0.2)
+    algorithm._train_loop(config)
+
+    dtrain = xgboost.DMatrix(training[config["feature_names"]], label=training.label)
+    dvalid = xgboost.DMatrix(
+        validation[config["feature_names"]], label=validation.label
+    )
+    history: dict[str, Any] = {}
+    native = xgboost.train(
+        {**config["params"], "eval_metric": list(metrics)},
+        dtrain,
+        num_boost_round=30,
+        evals=[(dvalid, "validation")],
+        evals_result=history,
+        callbacks=[
+            xgboost.callback.EarlyStopping(
+                rounds=5,
+                data_name="validation",
+                metric_name="logloss",
+                maximize=False,
+                save_best=True,
+            )
+        ],
+        verbose_eval=False,
+    )
+    assert np.argmin(history["validation"]["logloss"]) != np.argmax(
+        history["validation"]["auc"]
+    )
+    report = reports[0]
+    metadata = report["checkpoint"]["training"]
+    assert metadata["selection_metric"] == "validation-logloss"
+    assert metadata["training_rounds"] == len(history["validation"]["logloss"]) < 30
+    assert metadata["best_iteration"] == native.best_iteration
+    assert metadata["best_score"] == native.best_score
+    assert np.isfinite(report["metrics"]["validation-logloss"])
+    assert np.isfinite(report["metrics"]["validation-auc"])
+    model = xgboost.Booster(model_file=bytearray(report["checkpoint"]["model"]))
+    np.testing.assert_allclose(model.predict(dvalid), native.predict(dvalid))
+
+
 def test_worker_uses_explicit_metric_direction(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -385,11 +452,13 @@ def test_worker_resumes_saved_progress_and_native_patience(
         **(
             {"disable_default_eval_metric": True}
             if no_metrics
-            else {"eval_metric": "logloss"}
+            else {"eval_metric": ["logloss", "auc"] if early else "logloss"}
         ),
     )
     if early:
-        config.update(early_stopping_rounds=4, maximize=False)
+        config.update(
+            early_stopping_rounds=4, maximize=False, selection_metric="logloss"
+        )
     monkeypatch.setattr(train, "get_checkpoint", lambda: None)
     saved = tmp_path / "committed"
 
@@ -406,6 +475,16 @@ def test_worker_resumes_saved_progress_and_native_patience(
     with pytest.raises(Failure):
         algorithm._train_loop(config)
     assert not evidence
+    if early:
+        with pytest.raises(AlgorithmExecutionError, match="checkpoint is invalid"):
+            read_checkpoint(
+                saved,
+                identity=recovery_identity(config, 2),
+                rounds=20,
+                patience=4,
+                maximize=False,
+                selection_metric="auc",
+            )
     if no_metrics:
         assert (
             json.loads((saved / "recovery_state.json").read_text())["last_metrics"]
@@ -452,7 +531,11 @@ def test_worker_resumes_saved_progress_and_native_patience(
         evals=[(matrix, "train"), (validation, "validation")],
         callbacks=[
             xgboost.callback.EarlyStopping(
-                rounds=4, data_name="validation", maximize=False, save_best=True
+                rounds=4,
+                data_name="validation",
+                metric_name="logloss",
+                maximize=False,
+                save_best=True,
             )
         ]
         if early

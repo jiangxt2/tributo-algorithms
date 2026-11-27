@@ -110,8 +110,13 @@ For validation-driven model selection, include these fields in the existing
 }
 ```
 
-Early stopping requires validation, one explicit `model.eval_metric` string,
-positive integer patience, and an explicit boolean `training.maximize`.
+Early stopping requires validation, explicit `model.eval_metric` strings,
+positive integer patience, and an explicit boolean `training.maximize`. With
+multiple evaluation metrics, set `training.selection_metric` to the metric
+that controls early stopping and best-model selection. For example, use
+`"eval_metric": ["logloss", "auc"]` and `"selection_metric": "logloss"`
+to select by validation logloss while also reporting AUC. A single metric does
+not require `selection_metric`.
 Patience may exceed the round limit. The native XGBoost callback selects the
 best prefix even when the round limit is reached before patience expires.
 Linear Boosters cannot export this selected prefix. A provided validation

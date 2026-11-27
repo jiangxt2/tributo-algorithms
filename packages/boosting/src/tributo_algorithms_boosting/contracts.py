@@ -9,13 +9,14 @@ from typing import Any
 
 def _validate_training_options(
     training: Mapping[str, Any], model: Mapping[str, Any]
-) -> tuple[int, int | None, bool | None]:
+) -> tuple[int, int | None, bool | None, str | None]:
     if unknown := sorted(
         set(training)
         - {
             "num_rounds",
             "early_stopping_rounds",
             "maximize",
+            "selection_metric",
             "checkpoint_interval_rounds",
         }
     ):
@@ -25,20 +26,32 @@ def _validate_training_options(
         raise ValueError("XGBoost num_rounds/num_boost_round must be positive")
     patience = training.get("early_stopping_rounds")
     if patience is None:
-        if "maximize" in training:
-            raise ValueError("training.maximize requires early stopping")
-        return rounds, None, None
+        if "maximize" in training or "selection_metric" in training:
+            raise ValueError(
+                "training.maximize or selection_metric requires early stopping"
+            )
+        return rounds, None, None, None
     if not isinstance(patience, int) or isinstance(patience, bool) or patience < 1:
         raise ValueError("training.early_stopping_rounds must be a positive integer")
     maximize = training.get("maximize")
     if not isinstance(maximize, bool):
         raise ValueError("early stopping requires an explicit training.maximize bool")
     metric = model.get("eval_metric")
-    if not isinstance(metric, str) or not metric.strip():
-        raise ValueError("early stopping requires a single model.eval_metric string")
+    metrics = [metric] if isinstance(metric, str) else metric
+    if (
+        not isinstance(metrics, (list, tuple))
+        or not metrics
+        or any(not isinstance(item, str) or not item.strip() for item in metrics)
+    ):
+        raise ValueError("early stopping requires explicit model.eval_metric strings")
+    selection = training.get("selection_metric")
+    if selection is None and len(metrics) == 1:
+        selection = metrics[0]
+    if not isinstance(selection, str) or selection not in metrics:
+        raise ValueError("training.selection_metric must select a model.eval_metric")
     if model.get("booster", "gbtree") == "gblinear":
         raise ValueError("early stopping best-model export requires a tree Booster")
-    return rounds, patience, maximize
+    return rounds, patience, maximize, selection
 
 
 def _validate_recovery_options(

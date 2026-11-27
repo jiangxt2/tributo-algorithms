@@ -82,6 +82,7 @@ def read_checkpoint(
     rounds: int,
     patience: int | None,
     maximize: bool | None = None,
+    selection_metric: str | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     """Fail closed on a corrupt, foreign, or internally inconsistent checkpoint."""
     import xgboost
@@ -129,6 +130,9 @@ def read_checkpoint(
                 len(scores) != state["completed_rounds"]
                 or not isinstance(state["metric"], str)
                 or not state["metric"]
+                or (
+                    selection_metric is not None and state["metric"] != selection_metric
+                )
             ):
                 raise ValueError("selection history is incomplete")
             best, score = state["best_iteration"], state["best_score"]
@@ -206,6 +210,10 @@ def read_checkpoint(
                         for key in ("best_iteration", "best_score", "maximize")
                     )
                 )
+                or (
+                    patience is not None
+                    and metadata["selection_metric"] != f"validation-{state['metric']}"
+                )
             ):
                 raise ValueError("final model mismatch")
         elif state["selected_sha256"] is not None:
@@ -230,6 +238,7 @@ def training_callback(
     interval: int,
     restored: Mapping[str, Any] | None = None,
     report: Callable[[Any, Any], None] | None = None,
+    selection_metric: str | None = None,
 ) -> Any:
     """Compose native early stopping with checkpointing in a defined order.
 
@@ -256,6 +265,7 @@ def training_callback(
                 xgboost.callback.EarlyStopping(
                     rounds=patience,
                     data_name="validation",
+                    metric_name=selection_metric,
                     maximize=maximize,
                     save_best=True,
                 )
@@ -313,11 +323,14 @@ def training_callback(
                     self.last_metrics[f"{role}-{metric}"] = score
             if self.early is not None:
                 validation = evals_log.get("validation", {})
-                if len(validation) != 1:
+                metric = selection_metric or (
+                    next(iter(validation)) if len(validation) == 1 else None
+                )
+                if metric not in validation:
                     raise AlgorithmExecutionError(
-                        "XGBoost selection metric is ambiguous"
+                        "XGBoost selection metric is missing or ambiguous"
                     )
-                metric, scores = next(iter(validation.items()))
+                scores = validation[metric]
                 if self.metric is not None and self.metric != metric:
                     raise AlgorithmExecutionError("XGBoost selection metric changed")
                 self.metric = metric
