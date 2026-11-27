@@ -41,19 +41,19 @@ def _verifier_module() -> ModuleType:
 def test_release_tag_resolves_the_single_distribution() -> None:
     resolver = _resolver_module()
 
-    release = resolver.resolve_release_package(_ROOT, "tributo-algorithms-v0.1.0")
+    release = resolver.resolve_release_package(_ROOT, "tributo-algorithms-v0.2.0")
 
     assert release.distribution == "tributo-algorithms"
-    assert release.version == "0.1.0"
+    assert release.version == "0.2.0"
 
 
 @pytest.mark.parametrize(
     "tag, message",
     [
-        ("tributo-algorithms-0.1.0", "must match"),
-        ("../tributo-algorithms-v0.1.0", "must match"),
-        ("unknown-v0.1.0", "must match"),
-        ("tributo-algorithms-v0.2.0", "does not match project version"),
+        ("tributo-algorithms-0.2.0", "must match"),
+        ("../tributo-algorithms-v0.2.0", "must match"),
+        ("unknown-v0.2.0", "must match"),
+        ("tributo-algorithms-v0.1.0", "does not match project version"),
     ],
 )
 def test_release_tag_rejects_unsafe_or_inconsistent_values(
@@ -76,7 +76,7 @@ def test_release_resolver_writes_github_step_outputs(tmp_path: Path) -> None:
             "--root",
             str(_ROOT),
             "--tag",
-            "tributo-algorithms-v0.1.0",
+            "tributo-algorithms-v0.2.0",
             "--github-output",
             str(github_output),
         ],
@@ -88,7 +88,7 @@ def test_release_resolver_writes_github_step_outputs(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert github_output.read_text(encoding="utf-8").splitlines() == [
         "distribution=tributo-algorithms",
-        "version=0.1.0",
+        "version=0.2.0",
     ]
 
 

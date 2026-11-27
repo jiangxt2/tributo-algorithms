@@ -20,7 +20,7 @@ from tributo.algorithms.api import (
 from tributo.training.algorithm_spec import AlgorithmSpec, Capability, ProblemType
 
 _PACKAGE = "tributo-algorithms"
-_VERSION = "0.1.0"
+_VERSION = "0.2.0"
 _COMMON_STATE = (
     StateField("treated_count", "int64", ()),
     StateField("control_count", "int64", ()),

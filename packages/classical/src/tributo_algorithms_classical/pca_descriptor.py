@@ -19,7 +19,7 @@ from tributo.algorithms.api import (
 from tributo.training.algorithm_spec import AlgorithmSpec, Capability, DataLoadingMode
 
 _PACKAGE = "tributo-algorithms"
-_VERSION = "0.1.0"
+_VERSION = "0.2.0"
 _INPUT = "tributo.official.tabular.unlabeled_dense.v1"
 _OUTPUT = "tributo.official.unsupervised.pca.transform.v1"
 _COVERAGE = "tributo.official.distributed.coverage.v1"

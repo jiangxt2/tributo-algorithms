@@ -20,7 +20,7 @@ from tributo.training.algorithm_spec import AlgorithmSpec, Capability, ProblemTy
 STAGES = ("mu0", "mu1", "propensity")
 
 _PACKAGE = "tributo-algorithms"
-_VERSION = "0.1.0"
+_VERSION = "0.2.0"
 
 
 def _binding(contract_id: str, digest: str, validator: str) -> ContractBinding:
