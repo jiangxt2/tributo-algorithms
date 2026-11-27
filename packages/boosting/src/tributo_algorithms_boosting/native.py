@@ -190,35 +190,35 @@ class OfficialXGBoostONNXExporter:
             else xgboost.XGBRegressor()
         )
         model.load_model(bytearray(booster.save_raw(raw_format="ubj")))
-        raw_base_score = json.loads(learner["learner_model_param"]["base_score"])
-        base_scores = (
-            raw_base_score if isinstance(raw_base_score, list) else [raw_base_score]
-        )
-        boundary_margin: float | None = None
-        if objective == "binary:logistic" and base_scores in ([0], [1]):
-            # Ask XGBoost for its own initial margin; its boundary handling
-            # differs across versions and from the converter's direct logit.
+        initial_margin: float | None = None
+        if objective == "binary:logistic":
+            # Ask XGBoost for its own initial margin; its handling of scores
+            # near the boundaries differs from the converter's direct logit.
+            raw_base_score = json.loads(learner["learner_model_param"]["base_score"])
+            base_scores = (
+                raw_base_score if isinstance(raw_base_score, list) else [raw_base_score]
+            )
             probe = xgboost.DMatrix(np.zeros((1, feature_count), dtype=np.float32))
             initial = xgboost.train(
                 {"objective": objective, "base_score": base_scores[0], "nthread": 1},
                 probe,
                 num_boost_round=0,
             )
-            boundary_margin = float(initial.predict(probe, output_margin=True)[0])
+            initial_margin = float(initial.predict(probe, output_margin=True)[0])
             model.get_booster().set_param({"base_score": 0.5})
         converted = onnxmltools.convert_xgboost(
             model,
             initial_types=[("float_input", FloatTensorType([None, feature_count]))],
             target_opset=int(target.typed_options.get("opset", 15)),
         )
-        if boundary_margin is not None:
+        if initial_margin is not None:
             classifiers = [
                 node
                 for node in converted.graph.node
                 if node.domain == "ai.onnx.ml"
                 and node.op_type == "TreeEnsembleClassifier"
             ]
-            if len(classifiers) != 1 or not math.isfinite(boundary_margin):
+            if len(classifiers) != 1 or not math.isfinite(initial_margin):
                 raise ValueError("XGBoost ONNX classifier base margin is invalid")
             classifier = classifiers[0]
             attributes = [
@@ -227,7 +227,7 @@ class OfficialXGBoostONNXExporter:
             del classifier.attribute[:]
             classifier.attribute.extend(attributes)
             classifier.attribute.append(
-                onnx.helper.make_attribute("base_values", [boundary_margin])
+                onnx.helper.make_attribute("base_values", [initial_margin])
             )
         if objective == "reg:squarederror":
             output = converted.graph.output[0]

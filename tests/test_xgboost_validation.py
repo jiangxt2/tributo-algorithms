@@ -476,6 +476,8 @@ def test_explicit_onnx_task_preserves_multiclass_and_regression(
     [
         pytest.param(0.0, 0, id="zero"),
         pytest.param(1.0, 0, id="one"),
+        pytest.param(1e-40, 0, id="near-zero"),
+        pytest.param(0.99999994, 0, id="near-one"),
         pytest.param(0.2, 0, id="interior"),
         pytest.param(0.0, 100, id="zero-leaf"),
         pytest.param(1.0, 100, id="one-leaf"),
