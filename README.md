@@ -144,6 +144,36 @@ For H&M, use validation logloss for stopping. XGBoost's distributed AUC is an
 Compute AP, ROC-AUC, and Lift over the complete held-out predictions and labels
 in the calling application.
 
+## XGBoost checkpoint evaluation before Bundle export
+
+Formal XGBoost training can optionally call trusted application code after the
+selected checkpoint has been validated and before its Bundle is published. Set
+`output.checkpoint_evaluation` alongside `output.bundle_uri`:
+
+```json
+{
+  "output": {
+    "bundle_uri": "/models/example",
+    "checkpoint_evaluation": {
+      "callback": "my_application.evaluation:evaluate_checkpoint",
+      "options": {"evaluation_data_uri": "/data/holdout.parquet"}
+    }
+  }
+}
+```
+
+The referenced function must be importable in the Ray Job execution environment.
+It receives an independent XGBoost `Booster` as its first argument and keyword
+arguments `feature_names` (an ordered tuple) and `options` (a JSON object).
+The application supplies and reads its own evaluation data. Return a mapping
+from nonempty metric names to finite Python `int` or `float` values; the values
+are available as `result.execution.metrics["checkpoint_evaluation"]`. Callback errors,
+an unavailable reference, or invalid metrics fail the run before publication.
+Omitting the configuration retains the existing export behavior. The callback
+is trusted code with the Ray Job's permissions; do not put credentials in options.
+This evaluates the checkpoint model, not a converted ONNX artifact. Tune
+fit-only trials do not run Bundle export or this callback.
+
 ## XGBoost inference feature order
 
 When training feature names are available, the ONNX artifact records their

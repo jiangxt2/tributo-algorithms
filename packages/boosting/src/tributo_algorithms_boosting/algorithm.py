@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import hashlib
+import importlib
 import json
 import math
 import tempfile
@@ -17,12 +18,14 @@ from tributo.algorithms.api import (
     AlgorithmConfigurationError,
     AlgorithmExecutionError,
     AlgorithmExecutionResult,
+    QualifiedReference,
     ResolvedAlgorithmPlan,
 )
 from tributo.algorithms.spi import FrameworkNativeAlgorithm
 
 from tributo_algorithms_boosting.contracts import (
     XGBoostInputValidator,
+    _checkpoint_evaluation_config,
     _validate_recovery_options,
     _validate_training_metadata,
     _validate_training_options,
@@ -619,6 +622,60 @@ def create_algorithm(
     return DistributedXGBoost(plan)
 
 
+def _evaluation_options(value: object) -> object:
+    """Copy portable options out of the immutable resolved plan."""
+    if isinstance(value, Mapping):
+        return {key: _evaluation_options(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_evaluation_options(item) for item in value]
+    return value
+
+
+def _evaluate_checkpoint(
+    config: Mapping[str, Any], model_bytes: bytes, feature_names: tuple[str, ...]
+) -> dict[str, float]:
+    import xgboost
+
+    reference = QualifiedReference.parse(config["callback"])
+    try:
+        callback: object = importlib.import_module(reference.module)
+        for part in reference.qualname.split("."):
+            callback = getattr(callback, part)
+        if not callable(callback):
+            raise TypeError("callback is not callable")
+        model = xgboost.Booster(model_file=bytearray(model_bytes))
+        result = callback(
+            model,
+            feature_names=feature_names,
+            options=_evaluation_options(config.get("options", {})),
+        )
+    except Exception:
+        raise AlgorithmExecutionError("XGBoost checkpoint evaluation failed") from None
+
+    if not isinstance(result, Mapping):
+        raise AlgorithmExecutionError(
+            "XGBoost checkpoint evaluation metrics are invalid"
+        )
+    metrics: dict[str, float] = {}
+    for name, value in result.items():
+        if not isinstance(name, str) or not name or type(value) not in (int, float):
+            raise AlgorithmExecutionError(
+                "XGBoost checkpoint evaluation metrics are invalid"
+            )
+        try:
+            score = float(value)
+        except (OverflowError, ValueError):
+            raise AlgorithmExecutionError(
+                "XGBoost checkpoint evaluation metrics are invalid"
+            ) from None
+        if not math.isfinite(score):
+            raise AlgorithmExecutionError(
+                "XGBoost checkpoint evaluation metrics are invalid"
+            )
+        metrics[name] = score
+    return metrics
+
+
 def export_result(
     *,
     result: object,
@@ -670,6 +727,10 @@ def export_result(
     output = plan.algorithm_config.get("output")
     if not isinstance(output, Mapping) or not isinstance(output.get("bundle_uri"), str):
         raise AlgorithmConfigurationError("XGBoost output.bundle_uri is required")
+    try:
+        evaluation = _checkpoint_evaluation_config(output)
+    except ValueError as exc:
+        raise AlgorithmConfigurationError(str(exc)) from exc
     with cast(Any, checkpoint).as_directory() as directory:
         root = Path(directory)
         training = cast(Mapping[str, Any], plan.algorithm_config.get("training", {}))
@@ -792,10 +853,13 @@ def export_result(
             framework_version=xgboost.__version__,
             checkpoint_format_version=1,
         )
-        source_fingerprint = hashlib.sha256(
-            bytes(booster.save_raw(raw_format="ubj"))
-        ).hexdigest()
+        model_bytes = bytes(booster.save_raw(raw_format="ubj"))
+        source_fingerprint = hashlib.sha256(model_bytes).hexdigest()
         metrics["model_state_digest"] = source_fingerprint
+        if evaluation is not None:
+            metrics["checkpoint_evaluation"] = _evaluate_checkpoint(
+                evaluation, model_bytes, feature_names
+            )
         source = ExportSource(
             source_kind="xgboost_result",
             model_object=booster,
