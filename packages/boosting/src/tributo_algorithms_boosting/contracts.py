@@ -45,10 +45,22 @@ def _validate_training_options(
     ):
         raise ValueError("early stopping requires explicit model.eval_metric strings")
     selection = training.get("selection_metric")
-    if selection is None and len(metrics) == 1:
-        selection = metrics[0]
-    if not isinstance(selection, str) or selection not in metrics:
-        raise ValueError("training.selection_metric must select a model.eval_metric")
+    if len(metrics) == 1:
+        if selection is not None and selection != metrics[0]:
+            raise ValueError(
+                "training.selection_metric must select a model.eval_metric"
+            )
+        selection = None
+    else:
+        if not isinstance(selection, str) or selection not in metrics:
+            raise ValueError(
+                "training.selection_metric must select a model.eval_metric"
+            )
+        if "@" in selection:
+            raise ValueError(
+                "parameterized selection_metric is not supported with multiple "
+                "metrics; select a non-parameterized metric or use one metric"
+            )
     if model.get("booster", "gbtree") == "gblinear":
         raise ValueError("early stopping best-model export requires a tree Booster")
     return rounds, patience, maximize, selection

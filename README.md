@@ -116,7 +116,9 @@ multiple evaluation metrics, set `training.selection_metric` to the metric
 that controls early stopping and best-model selection. For example, use
 `"eval_metric": ["logloss", "auc"]` and `"selection_metric": "logloss"`
 to select by validation logloss while also reporting AUC. A single metric does
-not require `selection_metric`.
+not require `selection_metric` and may contain parameters such as `error@0.5`.
+When evaluating multiple metrics, the selected metric cannot contain `@`;
+choose a non-parameterized metric or run the parameterized metric alone.
 Patience may exceed the round limit. The native XGBoost callback selects the
 best prefix even when the round limit is reached before patience expires.
 Linear Boosters cannot export this selected prefix. A provided validation

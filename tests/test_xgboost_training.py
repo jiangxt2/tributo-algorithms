@@ -302,6 +302,31 @@ def test_fixed_round_training_accepts_frozen_multiple_metrics(
     assert np.isfinite(reports[0]["metrics"]["train-auc"])
 
 
+def test_single_parameterized_metric_uses_reported_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    validation = _frame().copy()
+    validation["label"] = 1 - validation["label"]
+    _, evidence, reports = _worker(
+        monkeypatch, tmp_path, _frame(), validation=_Shard(validation)
+    )
+    config = _config(evidence)
+    config.update(
+        input_roles=["train", "validation"],
+        num_boost_round=5,
+        early_stopping_rounds=2,
+        maximize=False,
+    )
+    config["params"].update(eval_metric="error@0.5", min_child_weight=0)
+    algorithm._train_loop(config)
+
+    metrics = reports[0]["metrics"]
+    metadata = reports[0]["checkpoint"]["training"]
+    assert metadata["selection_metric"] == "validation-error"
+    assert "validation-error" in metrics
+    assert metadata["model_rounds"] == metadata["best_iteration"] + 1
+
+
 @pytest.mark.parametrize("metrics", [("logloss", "auc"), ("auc", "logloss")])
 def test_multiple_metrics_select_logloss_best_model(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, metrics: tuple[str, str]
@@ -423,10 +448,20 @@ def test_worker_rejects_missing_or_empty_validation_without_success(
 
 
 @pytest.mark.parametrize(
-    "early,no_metrics", [(False, False), (True, False), (False, True)]
+    "early,no_metrics,selection",
+    [
+        (False, False, None),
+        (True, False, "multi"),
+        (False, True, None),
+        (True, False, "error@0.5"),
+    ],
 )
 def test_worker_resumes_saved_progress_and_native_patience(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, early: bool, no_metrics: bool
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    early: bool,
+    no_metrics: bool,
+    selection: str | None,
 ) -> None:
     import shutil
 
@@ -452,13 +487,17 @@ def test_worker_resumes_saved_progress_and_native_patience(
         **(
             {"disable_default_eval_metric": True}
             if no_metrics
-            else {"eval_metric": ["logloss", "auc"] if early else "logloss"}
+            else {
+                "eval_metric": ["logloss", "auc"]
+                if selection == "multi"
+                else selection or "logloss"
+            }
         ),
     )
     if early:
-        config.update(
-            early_stopping_rounds=4, maximize=False, selection_metric="logloss"
-        )
+        config.update(early_stopping_rounds=4, maximize=False)
+        if selection == "multi":
+            config["selection_metric"] = "logloss"
     monkeypatch.setattr(train, "get_checkpoint", lambda: None)
     saved = tmp_path / "committed"
 
@@ -475,7 +514,7 @@ def test_worker_resumes_saved_progress_and_native_patience(
     with pytest.raises(Failure):
         algorithm._train_loop(config)
     assert not evidence
-    if early:
+    if selection == "multi":
         with pytest.raises(AlgorithmExecutionError, match="checkpoint is invalid"):
             read_checkpoint(
                 saved,
@@ -497,6 +536,8 @@ def test_worker_resumes_saved_progress_and_native_patience(
             with checkpoint.as_directory() as directory:
                 raw = (Path(directory) / "model.ubj").read_bytes()
                 full = (Path(directory) / "training.ubj").read_bytes()
+                if selection == "error@0.5":
+                    shutil.copytree(directory, tmp_path / "final-checkpoint")
             reports.append({"metrics": metrics, "raw": raw, "full": full})
 
     monkeypatch.setattr(
@@ -533,7 +574,7 @@ def test_worker_resumes_saved_progress_and_native_patience(
             xgboost.callback.EarlyStopping(
                 rounds=4,
                 data_name="validation",
-                metric_name="logloss",
+                metric_name="logloss" if selection == "multi" else None,
                 maximize=False,
                 save_best=True,
             )
@@ -548,6 +589,37 @@ def test_worker_resumes_saved_progress_and_native_patience(
     if early:
         assert metrics["best_iteration"] == native.best_iteration == 0
         assert metrics["best_score"] == native.best_score
+        if selection == "error@0.5":
+            assert metrics["selection_metric"] == "validation-error"
+            plan = SimpleNamespace(
+                plan_id=config["plan_id"],
+                runtime=SimpleNamespace(worker_count=2),
+                primary_input_binding=SimpleNamespace(
+                    feature_names=("b", "a"), label_name="label"
+                ),
+                input_bindings=SimpleNamespace(
+                    bindings=[
+                        SimpleNamespace(name=role) for role in config["input_roles"]
+                    ]
+                ),
+                algorithm_config={
+                    "model": config["params"],
+                    "training": {
+                        "num_rounds": 20,
+                        "checkpoint_interval_rounds": 3,
+                        "early_stopping_rounds": 4,
+                        "maximize": False,
+                    },
+                    "output": {"bundle_uri": str(tmp_path / "bundle")},
+                },
+            )
+            result = algorithm.export_result(
+                result=SimpleNamespace(metrics=metrics),
+                checkpoint=Checkpoint.from_directory(tmp_path / "final-checkpoint"),
+                plan=plan,
+                run_id="single-parameterized-metric",
+            )
+            assert result.metrics["selection_metric"] == "validation-error"
 
 
 @pytest.mark.parametrize("early", [False, True])

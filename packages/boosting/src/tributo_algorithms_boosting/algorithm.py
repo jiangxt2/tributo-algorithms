@@ -247,9 +247,11 @@ def _train_loop(config: dict[str, Any]) -> None:
                     if state is not None
                     else history.get("validation", {})
                 )
-                if selection_metric not in validation_history:
-                    raise AlgorithmExecutionError("XGBoost selection metric is missing")
                 metric = selection_metric
+                if metric is None and len(validation_history) == 1:
+                    metric = next(iter(validation_history))
+                if metric not in validation_history:
+                    raise AlgorithmExecutionError("XGBoost selection metric is missing")
                 scores = validation_history[metric]
                 if not scores or any(not math.isfinite(score) for score in scores):
                     raise AlgorithmExecutionError(

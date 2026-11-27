@@ -97,6 +97,12 @@ def test_multiple_metrics_require_a_configured_selection() -> None:
         XGBoostConfigValidator().validate(config)
     config["training"]["selection_metric"] = "logloss"
     XGBoostConfigValidator().validate(config)
+    config["model"]["eval_metric"] = ["error@0.5", "auc"]
+    config["training"]["selection_metric"] = "error@0.5"
+    with pytest.raises(ValueError, match="parameterized selection_metric"):
+        XGBoostConfigValidator().validate(config)
+    config["training"]["selection_metric"] = "auc"
+    XGBoostConfigValidator().validate(config)
 
 
 def test_stopping_rejects_linear_booster_and_inactive_direction() -> None:

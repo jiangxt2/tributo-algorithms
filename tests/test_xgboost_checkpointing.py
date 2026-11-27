@@ -279,35 +279,7 @@ def test_checkpoint_roundtrip_without_evaluation_metrics(
     assert restored["phase"] == phase and restored["last_metrics"] == {}
 
 
-def test_early_stopping_checkpoint_rejects_missing_selection_metric(
-    tmp_path: Path,
-) -> None:
-    matrix = _matrix()
-    state = training_callback(dtrain=matrix, patience=2, maximize=False, interval=0)
-    xgboost.train(
-        {"objective": "binary:logistic", "nthread": 1},
-        matrix,
-        num_boost_round=2,
-        evals=[(matrix, "train"), (matrix, "validation")],
-        callbacks=[state],
-        verbose_eval=False,
-    )
-    identity = {**_identity(), "input_roles": ["train", "validation"]}
-    write_checkpoint(
-        tmp_path, full_model=state.full_model, state=state, identity=identity
-    )
-    path = tmp_path / "recovery_state.json"
-    saved = json.loads(path.read_text())
-    saved["last_metrics"] = {}
-    path.write_text(json.dumps(saved))
-    with pytest.raises(AlgorithmExecutionError, match="checkpoint is invalid") as error:
-        read_checkpoint(
-            tmp_path, identity=identity, rounds=2, patience=2, maximize=False
-        )
-    assert "last selection score mismatch" in str(error.value.__cause__)
-
-
-def test_final_checkpoint_selection_matches_model_metadata(tmp_path: Path) -> None:
+def test_early_stopping_checkpoint_checks_selection_consistency(tmp_path: Path) -> None:
     matrix = _matrix()
     state = training_callback(
         dtrain=matrix,
@@ -365,6 +337,17 @@ def test_final_checkpoint_selection_matches_model_metadata(tmp_path: Path) -> No
             maximize=False,
             selection_metric="logloss",
         )
+    metadata["selection_metric"] = "validation-logloss"
+    (tmp_path / "training_metadata.json").write_text(json.dumps(metadata))
+    path = tmp_path / "recovery_state.json"
+    saved = json.loads(path.read_text())
+    saved["last_metrics"] = {}
+    path.write_text(json.dumps(saved))
+    with pytest.raises(AlgorithmExecutionError, match="checkpoint is invalid") as error:
+        read_checkpoint(
+            tmp_path, identity=identity, rounds=2, patience=2, maximize=False
+        )
+    assert "last selection score mismatch" in str(error.value.__cause__)
 
 
 @pytest.mark.parametrize(
