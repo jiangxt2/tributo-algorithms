@@ -79,12 +79,30 @@ def test_stopping_configuration_rejects_invalid_types(
         XGBoostConfigValidator().validate(config)
 
 
-@pytest.mark.parametrize("metric", [None, "", ["logloss", "auc"]])
-def test_stopping_requires_one_explicit_metric(metric: object) -> None:
+@pytest.mark.parametrize("metric", [None, "", [], ["logloss", ""]])
+def test_stopping_requires_explicit_metrics(metric: object) -> None:
     config = _config()
     config["model"]["eval_metric"] = metric
-    with pytest.raises(ValueError, match="single model.eval_metric"):
+    with pytest.raises(ValueError, match="model.eval_metric"):
         XGBoostConfigValidator().validate(config)
+
+
+def test_multiple_metrics_require_a_configured_selection() -> None:
+    config = _config()
+    config["model"]["eval_metric"] = ["logloss", "auc"]
+    with pytest.raises(ValueError, match="selection_metric"):
+        XGBoostConfigValidator().validate(config)
+    config["training"]["selection_metric"] = "error"
+    with pytest.raises(ValueError, match="selection_metric"):
+        XGBoostConfigValidator().validate(config)
+    config["training"]["selection_metric"] = "logloss"
+    XGBoostConfigValidator().validate(config)
+    config["model"]["eval_metric"] = ["error@0.5", "auc"]
+    config["training"]["selection_metric"] = "error@0.5"
+    with pytest.raises(ValueError, match="parameterized selection_metric"):
+        XGBoostConfigValidator().validate(config)
+    config["training"]["selection_metric"] = "auc"
+    XGBoostConfigValidator().validate(config)
 
 
 def test_stopping_rejects_linear_booster_and_inactive_direction() -> None:

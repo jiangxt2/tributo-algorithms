@@ -279,23 +279,66 @@ def test_checkpoint_roundtrip_without_evaluation_metrics(
     assert restored["phase"] == phase and restored["last_metrics"] == {}
 
 
-def test_early_stopping_checkpoint_rejects_missing_selection_metric(
-    tmp_path: Path,
-) -> None:
+def test_early_stopping_checkpoint_checks_selection_consistency(tmp_path: Path) -> None:
     matrix = _matrix()
-    state = training_callback(dtrain=matrix, patience=2, maximize=False, interval=0)
-    xgboost.train(
-        {"objective": "binary:logistic", "nthread": 1},
+    state = training_callback(
+        dtrain=matrix,
+        patience=2,
+        maximize=False,
+        interval=0,
+        selection_metric="logloss",
+    )
+    model = xgboost.train(
+        {
+            "objective": "binary:logistic",
+            "nthread": 1,
+            "eval_metric": ["logloss", "auc"],
+        },
         matrix,
         num_boost_round=2,
-        evals=[(matrix, "train"), (matrix, "validation")],
+        evals=[(matrix, "validation")],
         callbacks=[state],
         verbose_eval=False,
     )
-    identity = {**_identity(), "input_roles": ["train", "validation"]}
+    identity = {**_identity(), "input_roles": ["validation"]}
+    metadata = {
+        "schema_version": 1,
+        "training_rounds": 2,
+        "model_rounds": model.num_boosted_rounds(),
+        "best_iteration": model.best_iteration,
+        "best_score": model.best_score,
+        "selection_metric": "validation-logloss",
+        "maximize": False,
+    }
     write_checkpoint(
-        tmp_path, full_model=state.full_model, state=state, identity=identity
+        tmp_path,
+        full_model=state.full_model,
+        state=state,
+        identity=identity,
+        selected=bytes(model.save_raw(raw_format="ubj")),
+        metadata=metadata,
     )
+    read_checkpoint(
+        tmp_path,
+        identity=identity,
+        rounds=2,
+        patience=2,
+        maximize=False,
+        selection_metric="logloss",
+    )
+    metadata["selection_metric"] = "validation-auc"
+    (tmp_path / "training_metadata.json").write_text(json.dumps(metadata))
+    with pytest.raises(AlgorithmExecutionError, match="checkpoint is invalid"):
+        read_checkpoint(
+            tmp_path,
+            identity=identity,
+            rounds=2,
+            patience=2,
+            maximize=False,
+            selection_metric="logloss",
+        )
+    metadata["selection_metric"] = "validation-logloss"
+    (tmp_path / "training_metadata.json").write_text(json.dumps(metadata))
     path = tmp_path / "recovery_state.json"
     saved = json.loads(path.read_text())
     saved["last_metrics"] = {}

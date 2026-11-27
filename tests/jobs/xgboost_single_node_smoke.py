@@ -20,6 +20,7 @@ from tributo.algorithms import (
     ExecutionProfile,
     ExecutionRequest,
     InputBinding,
+    InputBindingSet,
     build_algorithm_dispatcher,
 )
 from tributo.algorithms.spi import InputExecutionContext, InputResolutionContext
@@ -88,17 +89,22 @@ def _run_training(root: Path, train_path: Path, row_count: int) -> dict[str, Any
             read_options=ReadOptions(target_parallelism=4),
         )
     )
-    inputs = {"train-input": invocation}
+    inputs = {"train-input": invocation, "validation-input": invocation}
     request = ExecutionRequest(
         algorithm_request=AlgorithmRequest(
             algorithm="xgboost",
             operation=AlgorithmOperation.FIT,
-            input_binding=InputBinding(
-                name="train",
-                resolver_id=INGESTION_RESOLVER_ID,
-                reference="train-input",
-                feature_names=("f0", "f1"),
-                label_name="label",
+            input_binding=InputBindingSet(
+                bindings=tuple(
+                    InputBinding(
+                        name=role,
+                        resolver_id=INGESTION_RESOLVER_ID,
+                        reference=f"{role}-input",
+                        feature_names=("f0", "f1"),
+                        label_name="label",
+                    )
+                    for role in ("train", "validation")
+                )
             ),
             algorithm_config={
                 "data": {"label_col": "label"},
@@ -110,7 +116,12 @@ def _run_training(root: Path, train_path: Path, row_count: int) -> dict[str, Any
                     "max_depth": 2,
                     "eval_metric": ["logloss", "auc"],
                 },
-                "training": {"num_rounds": 3},
+                "training": {
+                    "num_rounds": 3,
+                    "early_stopping_rounds": 2,
+                    "maximize": False,
+                    "selection_metric": "logloss",
+                },
                 "ray": {"storage_path": str(root / "checkpoints")},
                 "output": {"bundle_uri": str(root / "bundle")},
             },
@@ -128,9 +139,19 @@ def _run_training(root: Path, train_path: Path, row_count: int) -> dict[str, Any
     assert len(receipt.workers) == 2
     assert len({worker.node_id for worker in receipt.workers}) == 1
     assert sum(worker.input_rows["train"] for worker in receipt.workers) == row_count
+    assert (
+        sum(worker.input_rows["validation"] for worker in receipt.workers) == row_count
+    )
     assert len({worker.model_state_digest for worker in receipt.workers}) == 1
     assert np.isfinite(result.execution.metrics["train-logloss"])
     assert np.isfinite(result.execution.metrics["train-auc"])
+    assert np.isfinite(result.execution.metrics["validation-logloss"])
+    assert np.isfinite(result.execution.metrics["validation-auc"])
+    assert result.execution.metrics["selection_metric"] == "validation-logloss"
+    assert (
+        result.execution.metrics["best_iteration"] + 1
+        == result.execution.metrics["model_rounds"]
+    )
 
     outputs = dict(result.execution.outputs)
     bundle = BundleRef(

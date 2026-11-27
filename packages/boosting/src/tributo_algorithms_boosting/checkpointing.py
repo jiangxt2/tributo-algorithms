@@ -82,6 +82,7 @@ def read_checkpoint(
     rounds: int,
     patience: int | None,
     maximize: bool | None = None,
+    selection_metric: str | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     """Fail closed on a corrupt, foreign, or internally inconsistent checkpoint."""
     import xgboost
@@ -129,6 +130,9 @@ def read_checkpoint(
                 len(scores) != state["completed_rounds"]
                 or not isinstance(state["metric"], str)
                 or not state["metric"]
+                or (
+                    selection_metric is not None and state["metric"] != selection_metric
+                )
             ):
                 raise ValueError("selection history is incomplete")
             best, score = state["best_iteration"], state["best_score"]
@@ -206,6 +210,10 @@ def read_checkpoint(
                         for key in ("best_iteration", "best_score", "maximize")
                     )
                 )
+                or (
+                    patience is not None
+                    and metadata["selection_metric"] != f"validation-{state['metric']}"
+                )
             ):
                 raise ValueError("final model mismatch")
         elif state["selected_sha256"] is not None:
@@ -222,6 +230,31 @@ def read_checkpoint(
         raise AlgorithmExecutionError("XGBoost recovery checkpoint is invalid") from exc
 
 
+def early_stopping_callback(
+    *, patience: int, maximize: bool | None, selection_metric: str | None
+) -> Any:
+    """Reject duplicate reported metric names before selecting a best model."""
+    import xgboost
+
+    class UniqueMetricEarlyStopping(xgboost.callback.EarlyStopping):
+        def after_iteration(self, model: Any, epoch: int, evals_log: Any) -> bool:
+            if epoch == 0:
+                for metric, scores in evals_log.get("validation", {}).items():
+                    if len(scores) > 1:
+                        raise AlgorithmExecutionError(
+                            f"XGBoost evaluation metrics have duplicate reported name {metric!r}"
+                        )
+            return bool(super().after_iteration(model, epoch, evals_log))
+
+    return UniqueMetricEarlyStopping(
+        rounds=patience,
+        data_name="validation",
+        metric_name=selection_metric,
+        maximize=maximize,
+        save_best=True,
+    )
+
+
 def training_callback(
     *,
     dtrain: Any,
@@ -230,6 +263,7 @@ def training_callback(
     interval: int,
     restored: Mapping[str, Any] | None = None,
     report: Callable[[Any, Any], None] | None = None,
+    selection_metric: str | None = None,
 ) -> Any:
     """Compose native early stopping with checkpointing in a defined order.
 
@@ -253,11 +287,10 @@ def training_callback(
             self.stopped = False
             self.full_model = b""
             self.early = (
-                xgboost.callback.EarlyStopping(
-                    rounds=patience,
-                    data_name="validation",
+                early_stopping_callback(
+                    patience=patience,
+                    selection_metric=selection_metric,
                     maximize=maximize,
-                    save_best=True,
                 )
                 if patience is not None
                 else None
@@ -313,11 +346,14 @@ def training_callback(
                     self.last_metrics[f"{role}-{metric}"] = score
             if self.early is not None:
                 validation = evals_log.get("validation", {})
-                if len(validation) != 1:
+                metric = selection_metric or (
+                    next(iter(validation)) if len(validation) == 1 else None
+                )
+                if metric not in validation:
                     raise AlgorithmExecutionError(
-                        "XGBoost selection metric is ambiguous"
+                        "XGBoost selection metric is missing or ambiguous"
                     )
-                metric, scores = next(iter(validation.items()))
+                scores = validation[metric]
                 if self.metric is not None and self.metric != metric:
                     raise AlgorithmExecutionError("XGBoost selection metric changed")
                 self.metric = metric
