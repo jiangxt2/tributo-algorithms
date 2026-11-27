@@ -283,6 +283,21 @@ def test_validation_is_evaluated_without_entering_training_gradients(
     assert "best_iteration" not in reports[0]["metrics"]
 
 
+def test_fixed_round_training_accepts_frozen_multiple_metrics(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _, evidence, reports = _worker(monkeypatch, tmp_path, _frame())
+    config = _config(evidence)
+    config["params"]["eval_metric"] = ("logloss", "auc")
+
+    algorithm._train_loop(config)
+
+    assert config["params"]["eval_metric"] == ("logloss", "auc")
+    assert reports[0]["metrics"]["training_rounds"] == 3
+    assert np.isfinite(reports[0]["metrics"]["train-logloss"])
+    assert np.isfinite(reports[0]["metrics"]["train-auc"])
+
+
 def test_worker_uses_explicit_metric_direction(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

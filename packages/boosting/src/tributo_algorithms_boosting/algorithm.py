@@ -207,8 +207,11 @@ def _train_loop(config: dict[str, Any]) -> None:
                     )
                 )
             evals = [(matrices[role], role) for role in roles]
+            params = dict(config["params"])
+            if isinstance(params.get("eval_metric"), tuple):
+                params["eval_metric"] = list(params["eval_metric"])
             booster = xgboost.train(
-                dict(config["params"]),
+                params,
                 matrices["train"],
                 num_boost_round=(
                     0

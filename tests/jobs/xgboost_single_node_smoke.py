@@ -108,7 +108,7 @@ def _run_training(root: Path, train_path: Path, row_count: int) -> dict[str, Any
                     "seed": 7,
                     "nthread": 1,
                     "max_depth": 2,
-                    "eval_metric": "logloss",
+                    "eval_metric": ["logloss", "auc"],
                 },
                 "training": {"num_rounds": 3},
                 "ray": {"storage_path": str(root / "checkpoints")},
@@ -129,6 +129,8 @@ def _run_training(root: Path, train_path: Path, row_count: int) -> dict[str, Any
     assert len({worker.node_id for worker in receipt.workers}) == 1
     assert sum(worker.input_rows["train"] for worker in receipt.workers) == row_count
     assert len({worker.model_state_digest for worker in receipt.workers}) == 1
+    assert np.isfinite(result.execution.metrics["train-logloss"])
+    assert np.isfinite(result.execution.metrics["train-auc"])
 
     outputs = dict(result.execution.outputs)
     bundle = BundleRef(
