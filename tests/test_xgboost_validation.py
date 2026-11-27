@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from typing import Any, cast
@@ -31,6 +32,7 @@ from tributo.exporting.models import (
     ExportTarget,
     PlannedTarget,
 )
+from tributo.exporting.runtime import BundleModelLoader
 from tributo.inference.batch_predictor import XGBoostONNXPredictor
 from tributo_algorithms_boosting.algorithm import DistributedXGBoost, export_result
 from tributo_algorithms_boosting.contracts import (
@@ -66,8 +68,11 @@ def _evaluation_callback(
     assert feature_names == ("feature",)
     assert options == {"nested": {"values": [1, 2]}}
     data = xgboost.DMatrix(np.array([[-1.0], [1.0]], dtype=np.float32), label=[0, 1])
-    score = float(booster.predict(data).mean())
+    predictions = booster.predict(data)
+    score = float(predictions.mean())
+    data.set_label(np.array([1, 1]))
     booster.update(data, iteration=booster.num_boosted_rounds())
+    assert not np.allclose(booster.predict(data), predictions)
     options["nested"]["values"].append(3)
     return {"mean_prediction": score}
 
@@ -97,21 +102,26 @@ def evaluation_export(tmp_path: Path) -> tuple[Any, Any, Path, Any]:
     return booster, checkpoint, tmp_path / "bundle", features
 
 
+def _evaluation_plan(bundle: Path, evaluation: object) -> Any:
+    return SimpleNamespace(
+        distribution_spec=None,
+        implementation=SimpleNamespace(
+            exporter_ref=QualifiedReference.parse(
+                "tributo_algorithms_boosting.algorithm:export_result"
+            )
+        ),
+        primary_input_binding=SimpleNamespace(feature_names=("feature",)),
+        algorithm_config={
+            "output": {"bundle_uri": str(bundle), "checkpoint_evaluation": evaluation}
+        },
+    )
+
+
 def _export_with_evaluation(checkpoint: Any, bundle: Path, evaluation: object) -> Any:
     return export_result(
         result=SimpleNamespace(metrics={}),
         checkpoint=checkpoint,
-        plan=cast(
-            ResolvedAlgorithmPlan,
-            SimpleNamespace(
-                algorithm_config={
-                    "output": {
-                        "bundle_uri": str(bundle),
-                        "checkpoint_evaluation": evaluation,
-                    }
-                }
-            ),
-        ),
+        plan=cast(ResolvedAlgorithmPlan, _evaluation_plan(bundle, evaluation)),
         run_id="checkpoint-evaluation",
     )
 
@@ -151,26 +161,16 @@ def test_checkpoint_evaluation_returns_metrics_and_preserves_bundle_models(
         _framework_execution_result,
     )
 
-    plan = SimpleNamespace(
-        distribution_spec=None,
-        implementation=SimpleNamespace(
-            exporter_ref=QualifiedReference.parse(
-                "tributo_algorithms_boosting.algorithm:export_result"
-            )
-        ),
-        algorithm_config={
-            "output": {
-                "bundle_uri": str(bundle),
-                "checkpoint_evaluation": MappingProxyType(
-                    {
-                        "callback": evaluation["callback"],
-                        "options": MappingProxyType(
-                            {"nested": MappingProxyType({"values": (1, 2)})}
-                        ),
-                    }
+    plan = _evaluation_plan(
+        bundle,
+        MappingProxyType(
+            {
+                "callback": evaluation["callback"],
+                "options": MappingProxyType(
+                    {"nested": MappingProxyType({"values": (1, 2)})}
                 ),
             }
-        },
+        ),
     )
     algorithm = SimpleNamespace(checkpoint_source=lambda result: checkpoint)
     result = _framework_execution_result(
@@ -265,6 +265,27 @@ def test_invalid_checkpoint_is_rejected_before_evaluation(
         _export_with_evaluation(
             checkpoint, bundle, {"callback": f"{__name__}:_evaluation_failure"}
         )
+    assert not bundle.exists()
+
+
+def test_checkpoint_feature_mismatch_does_not_invoke_evaluation(
+    evaluation_export: tuple[Any, Any, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, checkpoint, bundle, _ = evaluation_export
+    with checkpoint.as_directory() as directory:
+        (Path(directory) / "feature_names.json").write_text(json.dumps(["different"]))
+    calls: list[object] = []
+
+    def record_call(booster: object, **kwargs: Any) -> dict[str, float]:
+        calls.append(booster)
+        return {"score": 1.0}
+
+    monkeypatch.setattr(sys.modules[__name__], "_evaluation_callback", record_call)
+    with pytest.raises(AlgorithmExecutionError, match="checkpoint features"):
+        _export_with_evaluation(
+            checkpoint, bundle, {"callback": f"{__name__}:_evaluation_callback"}
+        )
+    assert not calls
     assert not bundle.exists()
 
 
@@ -549,7 +570,8 @@ def test_selected_model_and_metadata_survive_both_bundle_formats(
                             else {}
                         ),
                     }
-                }
+                },
+                primary_input_binding=SimpleNamespace(feature_names=("feature",)),
             ),
         ),
         run_id="selected-model",
@@ -662,7 +684,8 @@ def test_explicit_onnx_task_preserves_multiclass_and_regression(
         plan=cast(
             ResolvedAlgorithmPlan,
             SimpleNamespace(
-                algorithm_config={"output": {"bundle_uri": str(tmp_path / "bundle")}}
+                algorithm_config={"output": {"bundle_uri": str(tmp_path / "bundle")}},
+                primary_input_binding=SimpleNamespace(feature_names=("f0",)),
             ),
         ),
         run_id="task-parity",
@@ -683,15 +706,130 @@ def test_explicit_onnx_task_preserves_multiclass_and_regression(
     np.testing.assert_allclose(
         actual.reshape(expected.shape), expected, rtol=1e-6, atol=1e-7
     )
+    if not classification:
+        with BundleModelLoader().open(ref.canonical_uri) as runtime:
+            predictions = runtime.predict({"float_input": features})
+            assert set(predictions) == {"prediction"}
+            np.testing.assert_allclose(
+                predictions["prediction"].reshape(expected.shape),
+                expected,
+                rtol=1e-6,
+                atol=1e-7,
+            )
     assert hashlib.sha256(booster.save_raw(raw_format="ubj")).hexdigest() == digest
 
 
-def test_onnx_bundle_discovers_training_feature_order(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("base_score", "min_child_weight"),
+    [
+        pytest.param(0.0, 0, id="zero"),
+        pytest.param(1.0, 0, id="one"),
+        pytest.param(1e-40, 0, id="near-zero"),
+        pytest.param(0.99999994, 0, id="near-one"),
+        pytest.param(0.2, 0, id="interior"),
+        pytest.param(0.0, 100, id="zero-leaf"),
+        pytest.param(1.0, 100, id="one-leaf"),
+    ],
+)
+def test_onnx_binary_predictions_match_native_base_score(
+    tmp_path: Path, base_score: float, min_child_weight: int
+) -> None:
+    features = np.linspace(-3, 3, 64, dtype=np.float32).reshape(-1, 1)
+    matrix = xgboost.DMatrix(features, label=(features[:, 0] > 0).astype(np.int64))
+    booster = xgboost.train(
+        {
+            "objective": "binary:logistic",
+            "base_score": base_score,
+            "min_child_weight": min_child_weight,
+            "nthread": 1,
+        },
+        matrix,
+        num_boost_round=4,
+    )
+    original = bytes(booster.save_raw(raw_format="ubj"))
+    OfficialXGBoostONNXExporter().export(
+        ExportContext(execution_id="test", node_id="onnx", artifact_dir=tmp_path),
+        ExportSource(
+            source_kind="xgboost_result",
+            model_object=booster,
+            feature_schema={"feature_names": ["feature"]},
+        ),
+        {},
+        PlannedTarget(
+            target=ExportTarget(name="onnx", format="onnx"),
+            exporter_id="official-xgboost-onnx-v1",
+        ),
+    )
+    session = onnxruntime.InferenceSession(
+        str(tmp_path / "model.onnx"), providers=["CPUExecutionProvider"]
+    )
+    labels, probabilities = session.run(None, {"float_input": features})
+    expected = booster.predict(matrix)
+    np.testing.assert_allclose(probabilities[:, 1], expected, rtol=1e-5, atol=1e-6)
+    np.testing.assert_array_equal(labels, (expected > 0.5).astype(np.int64))
+    assert XGBoostONNXPredictor._load_feature_names(tmp_path / "model.onnx") == [
+        "feature"
+    ]
+    assert bytes(booster.save_raw(raw_format="ubj")) == original
+
+
+@pytest.mark.parametrize(
+    ("sidecar", "binding", "model_names"),
+    [
+        pytest.param(["b", "a"], ("a", "b"), None, id="sidecar-order"),
+        pytest.param(["a"], ("a",), None, id="model-count"),
+        pytest.param(["a", "b"], ("a", "b"), ["b", "a"], id="model-order"),
+        pytest.param("invalid", ("a", "b"), None, id="malformed-sidecar"),
+    ],
+)
+def test_export_rejects_checkpoint_feature_mismatch(
+    tmp_path: Path,
+    sidecar: object,
+    binding: tuple[str, ...],
+    model_names: list[str] | None,
+) -> None:
+    features = np.array([[0, 1], [1, 0]], dtype=np.float32)
+    booster = xgboost.train(
+        {"objective": "reg:squarederror", "nthread": 1},
+        xgboost.DMatrix(features, label=[0, 1], feature_names=model_names),
+        num_boost_round=1,
+    )
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    booster.save_model(checkpoint / "model.ubj")
+    (checkpoint / "feature_names.json").write_text(json.dumps(sidecar))
+    bundle = tmp_path / "bundle"
+    plan = cast(
+        ResolvedAlgorithmPlan,
+        SimpleNamespace(
+            algorithm_config={"output": {"bundle_uri": str(bundle)}},
+            primary_input_binding=SimpleNamespace(feature_names=binding),
+        ),
+    )
+    with pytest.raises(AlgorithmExecutionError, match="checkpoint features"):
+        export_result(
+            result=SimpleNamespace(metrics={}),
+            checkpoint=Checkpoint.from_directory(checkpoint),
+            plan=plan,
+            run_id="feature-mismatch",
+        )
+    assert not bundle.exists()
+
+
+@pytest.mark.parametrize("base_score", [0.0, 1.0, 0.5])
+def test_onnx_bundle_discovers_training_feature_order(
+    tmp_path: Path, base_score: float
+) -> None:
     first = np.linspace(-3, 3, 64, dtype=np.float32)
     second = np.zeros_like(first)
     features = np.column_stack((first, second))
     booster = xgboost.train(
-        {"objective": "binary:logistic", "min_child_weight": 0, "nthread": 1},
+        {
+            "objective": "binary:logistic",
+            "base_score": base_score,
+            "min_child_weight": 0,
+            "nthread": 1,
+        },
         xgboost.DMatrix(features, label=(first > 0).astype(np.int64)),
         num_boost_round=4,
     )
@@ -705,7 +843,12 @@ def test_onnx_bundle_discovers_training_feature_order(tmp_path: Path) -> None:
         checkpoint=Checkpoint.from_directory(checkpoint),
         plan=cast(
             ResolvedAlgorithmPlan,
-            SimpleNamespace(algorithm_config={"output": {"bundle_uri": bundle_uri}}),
+            SimpleNamespace(
+                algorithm_config={"output": {"bundle_uri": bundle_uri}},
+                primary_input_binding=SimpleNamespace(
+                    feature_names=("first", "second")
+                ),
+            ),
         ),
         run_id="feature-order",
     )
