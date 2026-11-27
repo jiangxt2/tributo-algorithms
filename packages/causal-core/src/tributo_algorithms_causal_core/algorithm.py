@@ -32,7 +32,7 @@ from tributo.algorithms.spi import AlgorithmExecutionContext, MapReduceAlgorithm
 from tributo.training.algorithm_spec import AlgorithmSpec, Capability, ProblemType
 
 _PACKAGE = "tributo-algorithms"
-_VERSION = "0.1.0"
+_VERSION = "0.2.0"
 _STATE_SCHEMA = (
     StateField("treated_count", "int64", ()),
     StateField("control_count", "int64", ()),

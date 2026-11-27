@@ -23,7 +23,7 @@ from tributo.training.algorithm_spec import (
 )
 
 _PACKAGE = "tributo-algorithms"
-_VERSION = "0.1.0"
+_VERSION = "0.2.0"
 _INPUT = "tributo.algorithm-input.ray-tabular.v1"
 _OUTPUT = "tributo.official.lightgbm.onnx.v1"
 

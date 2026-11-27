@@ -586,7 +586,7 @@ MULTINOMIAL_NB_REGISTRATION = AlgorithmRegistration(
     environment=EnvironmentSpec(
         environment_id="tributo.multinomial_nb.v1",
         dependencies=(
-            "tributo-algorithms[classical]==0.1.0",
+            "tributo-algorithms[classical]==0.2.0",
             "tributo>=1.1",
             "onnx>=1.16.0",
             "onnxruntime>=1.20.0",
@@ -626,7 +626,7 @@ MULTINOMIAL_NB_REGISTRATION = AlgorithmRegistration(
 MULTINOMIAL_NB_DESCRIPTOR = DistributedAlgorithmDescriptor(
     registration=MULTINOMIAL_NB_REGISTRATION,
     package_name="tributo-algorithms",
-    package_version="0.1.0",
+    package_version="0.2.0",
     tributo_version_spec=">=1.1",
     stability="alpha",
     tested=False,

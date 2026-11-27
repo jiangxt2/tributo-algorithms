@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tributo-algorithms"
-version = "0.1.0"
+version = "0.2.0"
 description = "Official algorithm implementations and optional dependency extras for Tributo"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"

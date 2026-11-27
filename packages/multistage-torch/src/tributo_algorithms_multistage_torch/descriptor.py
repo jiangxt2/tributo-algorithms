@@ -32,7 +32,7 @@ from tributo_algorithms_multistage_torch.contracts import (
 )
 
 _PACKAGE = "tributo-algorithms"
-_VERSION = "0.1.0"
+_VERSION = "0.2.0"
 _ROOT = Path(__file__).resolve().parent
 
 
