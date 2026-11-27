@@ -134,6 +134,20 @@ For H&M, use validation logloss for stopping. XGBoost's distributed AUC is an
 Compute AP, ROC-AUC, and Lift over the complete held-out predictions and labels
 in the calling application.
 
+## XGBoost inference feature order
+
+When training feature names are available, the ONNX artifact records their
+order in `feature_names` metadata. The `XGBoostONNXPredictor` can discover them
+and select batch columns in training order. Explicit feature names take
+precedence and must use that same order.
+
+Formal `InferenceRequest` callers must provide their ordered table columns in
+the tensor input binding. The binding order must match training; the tensor
+signature specifies its shape, not the names or order of the table columns.
+Raw ONNX and serving tensor inputs likewise require values in training order.
+For older models without feature metadata, supply the ordered names explicitly;
+the direct raw-model predictor otherwise falls back to batch column order.
+
 ## XGBoost periodic checkpoints and same-run recovery
 
 Enable periodic saving and a finite Worker failure allowance in the existing

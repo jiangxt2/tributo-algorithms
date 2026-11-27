@@ -10,6 +10,7 @@ from typing import Any, cast
 
 import numpy as np
 import onnxruntime
+import pandas as pd
 import pyarrow as pa
 import pytest
 import xgboost
@@ -22,7 +23,14 @@ from tributo.algorithms.api import (
     ResolvedAlgorithmPlan,
 )
 from tributo.exporting.bundle_reader import BundleReader
-from tributo.exporting.models import BundleRef, ExportSource
+from tributo.exporting.models import (
+    BundleRef,
+    ExportContext,
+    ExportSource,
+    ExportTarget,
+    PlannedTarget,
+)
+from tributo.inference.batch_predictor import XGBoostONNXPredictor
 from tributo_algorithms_boosting.algorithm import DistributedXGBoost, export_result
 from tributo_algorithms_boosting.contracts import (
     XGBoostConfigValidator,
@@ -35,6 +43,7 @@ from tributo_algorithms_boosting.descriptor import XGBOOST_DESCRIPTOR
 from tributo_algorithms_boosting.native import (
     OfficialXGBoostNativeFlavor,
     OfficialXGBoostNativeValidator,
+    OfficialXGBoostONNXExporter,
     XGBoostValidationOptions,
     _check_training_metadata,
 )
@@ -429,3 +438,74 @@ def test_explicit_onnx_task_preserves_multiclass_and_regression(
         actual.reshape(expected.shape), expected, rtol=1e-6, atol=1e-7
     )
     assert hashlib.sha256(booster.save_raw(raw_format="ubj")).hexdigest() == digest
+
+
+def test_onnx_bundle_discovers_training_feature_order(tmp_path: Path) -> None:
+    first = np.linspace(-3, 3, 64, dtype=np.float32)
+    second = np.zeros_like(first)
+    features = np.column_stack((first, second))
+    booster = xgboost.train(
+        {"objective": "binary:logistic", "min_child_weight": 0, "nthread": 1},
+        xgboost.DMatrix(features, label=(first > 0).astype(np.int64)),
+        num_boost_round=4,
+    )
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    booster.save_model(checkpoint / "model.ubj")
+    (checkpoint / "feature_names.json").write_text(json.dumps(["first", "second"]))
+    bundle_uri = str(tmp_path / "bundle")
+    result = export_result(
+        result=SimpleNamespace(metrics={}),
+        checkpoint=Checkpoint.from_directory(checkpoint),
+        plan=cast(
+            ResolvedAlgorithmPlan,
+            SimpleNamespace(algorithm_config={"output": {"bundle_uri": bundle_uri}}),
+        ),
+        run_id="feature-order",
+    )
+    bundle_uri = result.outputs["bundle_uri"]
+
+    assert XGBoostONNXPredictor.get_feature_names(bundle_uri=bundle_uri) == [
+        "first",
+        "second",
+    ]
+    automatic = XGBoostONNXPredictor(bundle_uri=bundle_uri)
+    explicit = XGBoostONNXPredictor(
+        bundle_uri=bundle_uri, predictor_config={"feature_names": ["first", "second"]}
+    )
+    table = pd.DataFrame({"first": first, "second": second})
+
+    def batch(frame: pd.DataFrame) -> dict[str, np.ndarray]:
+        return {name: frame[name].to_numpy() for name in frame.columns}
+
+    try:
+        expected = explicit(batch(table))["prediction"][:, 1]
+        for frame in (table, table[["second", "first"]]):
+            actual = automatic(batch(frame))["prediction"][:, 1]
+            np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-7)
+    finally:
+        automatic.close()
+        explicit.close()
+    native = booster.predict(xgboost.DMatrix(features))
+    swapped = booster.predict(xgboost.DMatrix(features[:, ::-1]))
+    assert not np.allclose(native, swapped)
+    np.testing.assert_allclose(expected, native, rtol=1e-6, atol=1e-7)
+
+
+def test_onnx_export_does_not_advertise_generated_feature_names(tmp_path: Path) -> None:
+    features = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32)
+    booster = xgboost.train(
+        {"objective": "binary:logistic", "nthread": 1},
+        xgboost.DMatrix(features, label=[0, 1]),
+        num_boost_round=1,
+    )
+    OfficialXGBoostONNXExporter().export(
+        ExportContext(execution_id="test", node_id="onnx", artifact_dir=tmp_path),
+        ExportSource(source_kind="xgboost_result", model_object=booster),
+        {},
+        PlannedTarget(
+            target=ExportTarget(name="onnx", format="onnx"),
+            exporter_id="official-xgboost-onnx-v1",
+        ),
+    )
+    assert XGBoostONNXPredictor._load_feature_names(tmp_path / "model.onnx") == []

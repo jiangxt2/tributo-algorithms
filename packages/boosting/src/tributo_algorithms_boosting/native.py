@@ -176,10 +176,7 @@ class OfficialXGBoostONNXExporter:
         feature_names = tuple(
             str(name) for name in source.feature_schema.get("feature_names", ())
         )
-        if not feature_names:
-            feature_names = tuple(
-                f"f{index}" for index in range(int(booster.num_features()))
-            )
+        feature_count = len(feature_names) or int(booster.num_features())
         # A raw Booster is classified heuristically from its cover values by
         # ONNXMLTools. A short best prefix can have integral covers even for
         # classification, so preserve the declared objective explicitly.
@@ -192,12 +189,14 @@ class OfficialXGBoostONNXExporter:
         model.load_model(bytearray(booster.save_raw(raw_format="ubj")))
         converted = onnxmltools.convert_xgboost(
             model,
-            initial_types=[
-                ("float_input", FloatTensorType([None, len(feature_names)]))
-            ],
+            initial_types=[("float_input", FloatTensorType([None, feature_count]))],
             target_opset=int(target.typed_options.get("opset", 15)),
         )
         converted.graph.name = "tributo-official-xgboost"
+        if feature_names:
+            feature_property = converted.metadata_props.add()
+            feature_property.key = "feature_names"
+            feature_property.value = json.dumps(feature_names)
         path = context.artifact_dir / "model.onnx"
         path.write_bytes(converted.SerializeToString())
         return ArtifactDraft(
