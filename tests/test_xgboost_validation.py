@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, cast
 
 import numpy as np
@@ -20,6 +21,7 @@ from tributo.algorithms.api import (
     AlgorithmExecutionError,
     InputBinding,
     InputBindingSet,
+    QualifiedReference,
     ResolvedAlgorithmPlan,
 )
 from tributo.exporting.bundle_reader import BundleReader
@@ -58,6 +60,233 @@ def _config() -> dict[str, Any]:
         "ray": {"storage_path": "/tmp/checkpoints"},
         "output": {"bundle_uri": "/tmp/bundle"},
     }
+
+
+def _evaluation_callback(
+    booster: Any, *, feature_names: tuple[str, ...], options: dict[str, Any]
+) -> dict[str, float]:
+    assert feature_names == ("feature",)
+    assert options == {"nested": {"values": [1, 2]}}
+    data = xgboost.DMatrix(np.array([[-1.0], [1.0]], dtype=np.float32), label=[0, 1])
+    predictions = booster.predict(data)
+    score = float(predictions.mean())
+    data.set_label(np.array([1, 1]))
+    booster.update(data, iteration=booster.num_boosted_rounds())
+    assert not np.allclose(booster.predict(data), predictions)
+    options["nested"]["values"].append(3)
+    return {"mean_prediction": score}
+
+
+def _evaluation_failure(booster: Any, **kwargs: Any) -> dict[str, float]:
+    raise RuntimeError("sensitive callback detail")
+
+
+def _invalid_evaluation(booster: Any, **kwargs: Any) -> object:
+    return kwargs["options"]["result"]
+
+
+@pytest.fixture
+def evaluation_export(tmp_path: Path) -> tuple[Any, Any, Path, Any]:
+    features = np.array([[-2.0], [-1.0], [1.0], [2.0]], dtype=np.float32)
+    data = xgboost.DMatrix(features, label=[0, 0, 1, 1])
+    booster = xgboost.train(
+        {"objective": "binary:logistic", "min_child_weight": 0, "nthread": 1},
+        data,
+        num_boost_round=2,
+    )
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_dir.mkdir()
+    booster.save_model(checkpoint_dir / "model.ubj")
+    (checkpoint_dir / "feature_names.json").write_text(json.dumps(["feature"]))
+    checkpoint = Checkpoint.from_directory(checkpoint_dir)
+    return booster, checkpoint, tmp_path / "bundle", features
+
+
+def _evaluation_plan(bundle: Path, evaluation: object) -> Any:
+    return SimpleNamespace(
+        distribution_spec=None,
+        implementation=SimpleNamespace(
+            exporter_ref=QualifiedReference.parse(
+                "tributo_algorithms_boosting.algorithm:export_result"
+            )
+        ),
+        primary_input_binding=SimpleNamespace(feature_names=("feature",)),
+        algorithm_config={
+            "output": {"bundle_uri": str(bundle), "checkpoint_evaluation": evaluation}
+        },
+    )
+
+
+def _export_with_evaluation(checkpoint: Any, bundle: Path, evaluation: object) -> Any:
+    return export_result(
+        result=SimpleNamespace(metrics={}),
+        checkpoint=checkpoint,
+        plan=cast(ResolvedAlgorithmPlan, _evaluation_plan(bundle, evaluation)),
+        run_id="checkpoint-evaluation",
+    )
+
+
+@pytest.mark.parametrize(
+    "evaluation",
+    [
+        None,
+        {},
+        {"callback": "invalid"},
+        {"callback": 1},
+        {"callback": "module:function", "options": []},
+        {"callback": "module:function", "unexpected": True},
+    ],
+)
+def test_checkpoint_evaluation_rejects_invalid_configuration(
+    evaluation: object,
+) -> None:
+    config = _config()
+    config["output"]["checkpoint_evaluation"] = evaluation
+    with pytest.raises(ValueError, match="checkpoint_evaluation"):
+        XGBoostConfigValidator().validate(config)
+
+
+def test_checkpoint_evaluation_returns_metrics_and_preserves_bundle_models(
+    evaluation_export: tuple[Any, Any, Path, Any],
+) -> None:
+    booster, checkpoint, bundle, features = evaluation_export
+    evaluation = {
+        "callback": f"{__name__}:_evaluation_callback",
+        "options": {"nested": {"values": [1, 2]}},
+    }
+    config = _config()
+    config["output"]["checkpoint_evaluation"] = evaluation
+    XGBoostConfigValidator().validate(config)
+    from tributo.integrations.algorithm_runtimes.framework_native import (
+        _framework_execution_result,
+    )
+
+    plan = _evaluation_plan(
+        bundle,
+        MappingProxyType(
+            {
+                "callback": evaluation["callback"],
+                "options": MappingProxyType(
+                    {"nested": MappingProxyType({"values": (1, 2)})}
+                ),
+            }
+        ),
+    )
+    algorithm = SimpleNamespace(checkpoint_source=lambda result: checkpoint)
+    result = _framework_execution_result(
+        algorithm=algorithm,
+        result=SimpleNamespace(metrics={}),
+        plan=plan,
+        run_id="checkpoint-evaluation",
+    )
+    expected = booster.predict(xgboost.DMatrix(features))
+    expected_score = booster.predict(xgboost.DMatrix(features[[1, 2]])).mean()
+    assert result.metrics["checkpoint_evaluation"]["mean_prediction"] == pytest.approx(
+        float(expected_score)
+    )
+    ref = BundleRef(
+        canonical_uri=result.outputs["bundle_uri"],
+        bundle_id=result.outputs["bundle_id"],
+        manifest_sha256=result.outputs["manifest_sha256"],
+    )
+    reader = BundleReader()
+    for role in ("native", "inference"):
+        with reader.open_artifact(ref, role=role) as artifact:
+            if role == "native":
+                model = OfficialXGBoostNativeFlavor().load(
+                    artifact, role="native", architecture_id="xgboost"
+                )
+                actual = model.predict({"float_input": features})["probabilities"][:, 1]
+            else:
+                session = onnxruntime.InferenceSession(
+                    str(artifact.entrypoint_path), providers=["CPUExecutionProvider"]
+                )
+                actual = session.run(None, {session.get_inputs()[0].name: features})[1][
+                    :, 1
+                ]
+            np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-7)
+
+
+@pytest.mark.parametrize(
+    "callback",
+    [
+        "missing_module:callback",
+        f"{__name__}:_evaluation_failure",
+        f"{__name__}:_config.__name__",
+    ],
+)
+def test_checkpoint_evaluation_callback_failure_prevents_publication(
+    evaluation_export: tuple[Any, Any, Path, Any], callback: str
+) -> None:
+    _, checkpoint, bundle, _ = evaluation_export
+    with pytest.raises(
+        AlgorithmExecutionError, match="checkpoint evaluation failed"
+    ) as error:
+        _export_with_evaluation(checkpoint, bundle, {"callback": callback})
+    assert "sensitive callback detail" not in str(error.value)
+    assert not bundle.exists()
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        None,
+        [],
+        {"": 1},
+        {"score": True},
+        {"score": float("nan")},
+        {"score": float("inf")},
+        {"score": "1"},
+    ],
+)
+def test_checkpoint_evaluation_invalid_metrics_prevent_publication(
+    evaluation_export: tuple[Any, Any, Path, Any], result: object
+) -> None:
+    _, checkpoint, bundle, _ = evaluation_export
+    with pytest.raises(AlgorithmExecutionError, match="evaluation metrics are invalid"):
+        _export_with_evaluation(
+            checkpoint,
+            bundle,
+            {
+                "callback": f"{__name__}:_invalid_evaluation",
+                "options": {"result": result},
+            },
+        )
+    assert not bundle.exists()
+
+
+def test_invalid_checkpoint_is_rejected_before_evaluation(
+    evaluation_export: tuple[Any, Any, Path, Any],
+) -> None:
+    _, checkpoint, bundle, _ = evaluation_export
+    with checkpoint.as_directory() as directory:
+        (Path(directory) / "training_metadata.json").write_text("{}")
+    with pytest.raises(AlgorithmExecutionError, match="training metadata is invalid"):
+        _export_with_evaluation(
+            checkpoint, bundle, {"callback": f"{__name__}:_evaluation_failure"}
+        )
+    assert not bundle.exists()
+
+
+def test_checkpoint_feature_mismatch_does_not_invoke_evaluation(
+    evaluation_export: tuple[Any, Any, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, checkpoint, bundle, _ = evaluation_export
+    with checkpoint.as_directory() as directory:
+        (Path(directory) / "feature_names.json").write_text(json.dumps(["different"]))
+    calls: list[object] = []
+
+    def record_call(booster: object, **kwargs: Any) -> dict[str, float]:
+        calls.append(booster)
+        return {"score": 1.0}
+
+    monkeypatch.setattr(sys.modules[__name__], "_evaluation_callback", record_call)
+    with pytest.raises(AlgorithmExecutionError, match="checkpoint features"):
+        _export_with_evaluation(
+            checkpoint, bundle, {"callback": f"{__name__}:_evaluation_callback"}
+        )
+    assert not calls
+    assert not bundle.exists()
 
 
 @pytest.mark.parametrize(
@@ -327,7 +556,21 @@ def test_selected_model_and_metadata_survive_both_bundle_formats(
         plan=cast(
             ResolvedAlgorithmPlan,
             SimpleNamespace(
-                algorithm_config={"output": {"bundle_uri": str(tmp_path / "bundle")}},
+                algorithm_config={
+                    "output": {
+                        "bundle_uri": str(tmp_path / "bundle"),
+                        **(
+                            {
+                                "checkpoint_evaluation": {
+                                    "callback": f"{__name__}:_evaluation_callback",
+                                    "options": {"nested": {"values": [1, 2]}},
+                                }
+                            }
+                            if include_metadata
+                            else {}
+                        ),
+                    }
+                },
                 primary_input_binding=SimpleNamespace(feature_names=("feature",)),
             ),
         ),
@@ -337,8 +580,13 @@ def test_selected_model_and_metadata_survive_both_bundle_formats(
     if include_metadata:
         assert result.metrics["model_rounds"] == result.metrics["best_iteration"] + 1
         assert result.metrics["model_rounds"] < result.metrics["training_rounds"]
+        evaluation_data = xgboost.DMatrix(np.array([[-1.0], [1.0]], dtype=np.float32))
+        assert result.metrics["checkpoint_evaluation"][
+            "mean_prediction"
+        ] == pytest.approx(float(selected.predict(evaluation_data).mean()))
     else:
         assert "best_iteration" not in result.metrics
+        assert "checkpoint_evaluation" not in result.metrics
         rejected = tmp_path / "missing-metadata-bundle"
         with pytest.raises(AlgorithmExecutionError, match="metadata is missing"):
             export_result(

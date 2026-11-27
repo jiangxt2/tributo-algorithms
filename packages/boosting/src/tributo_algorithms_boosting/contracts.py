@@ -6,6 +6,34 @@ import math
 from collections.abc import Mapping
 from typing import Any
 
+from tributo.algorithms.api import AlgorithmConfigurationError, QualifiedReference
+
+
+def _checkpoint_evaluation_config(
+    output: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    if "checkpoint_evaluation" not in output:
+        return None
+    evaluation = output["checkpoint_evaluation"]
+    if not isinstance(evaluation, Mapping) or set(evaluation) - {"callback", "options"}:
+        raise ValueError(
+            "XGBoost checkpoint_evaluation must contain callback and options"
+        )
+    callback = evaluation.get("callback")
+    if not isinstance(callback, str):
+        raise ValueError(
+            "XGBoost checkpoint_evaluation callback must be a qualified reference"
+        )
+    try:
+        QualifiedReference.parse(callback)
+    except AlgorithmConfigurationError as exc:
+        raise ValueError(
+            "XGBoost checkpoint_evaluation callback must be a qualified reference"
+        ) from exc
+    if "options" in evaluation and not isinstance(evaluation["options"], Mapping):
+        raise ValueError("XGBoost checkpoint_evaluation options must be a mapping")
+    return evaluation
+
 
 def _validate_training_options(
     training: Mapping[str, Any], model: Mapping[str, Any]
@@ -138,6 +166,7 @@ class XGBoostConfigValidator:
         output = value.get("output")
         if not isinstance(output, Mapping) or not output.get("bundle_uri"):
             raise ValueError("output.bundle_uri is required")
+        _checkpoint_evaluation_config(output)
         ray = value.get("ray")
         if not isinstance(ray, Mapping) or not ray.get("storage_path"):
             raise ValueError("ray.storage_path is required")
