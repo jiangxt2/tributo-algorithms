@@ -119,6 +119,8 @@ to select by validation logloss while also reporting AUC. A single metric does
 not require `selection_metric` and may contain parameters such as `error@0.5`.
 When evaluating multiple metrics, the selected metric cannot contain `@`;
 choose a non-parameterized metric or run the parameterized metric alone.
+Metrics that XGBoost reports under the same name are rejected during the first
+evaluation; remove the conflicting metric from the configuration.
 Patience may exceed the round limit. The native XGBoost callback selects the
 best prefix even when the round limit is reached before patience expires.
 Linear Boosters cannot export this selected prefix. A provided validation

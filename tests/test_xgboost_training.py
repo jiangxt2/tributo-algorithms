@@ -327,6 +327,79 @@ def test_single_parameterized_metric_uses_reported_name(
     assert metadata["model_rounds"] == metadata["best_iteration"] + 1
 
 
+@pytest.mark.parametrize(
+    "interval", [pytest.param(0, id="ordinary"), pytest.param(10, id="checkpoint")]
+)
+@pytest.mark.parametrize(
+    "metrics,selection",
+    [
+        pytest.param(("error", "error@0.5"), "error", id="selected-name"),
+        pytest.param(("error", "error@0.5", "auc"), "auc", id="other-name"),
+    ],
+)
+def test_early_stopping_rejects_duplicate_reported_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    interval: int,
+    metrics: tuple[str, ...],
+    selection: str,
+) -> None:
+    validation = _frame().copy()
+    validation["label"] = 1 - validation["label"]
+    _, evidence, reports = _worker(
+        monkeypatch, tmp_path, _frame(), validation=_Shard(validation)
+    )
+    config = _config(evidence)
+    config.update(
+        input_roles=["train", "validation"],
+        num_boost_round=8,
+        early_stopping_rounds=2,
+        maximize=False,
+        selection_metric=selection,
+        checkpoint_interval_rounds=interval,
+        invocation="fit",
+        plan_id="plan",
+    )
+    config["params"]["eval_metric"] = metrics
+    monkeypatch.setattr(train, "get_checkpoint", lambda: None)
+
+    with pytest.raises(
+        AlgorithmExecutionError, match="duplicate reported name 'error'"
+    ):
+        algorithm._train_loop(config)
+    assert not evidence and not reports
+
+
+@pytest.mark.parametrize(
+    "interval", [pytest.param(0, id="ordinary"), pytest.param(10, id="checkpoint")]
+)
+def test_early_stopping_allows_distinct_parameterized_metric(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, interval: int
+) -> None:
+    validation = _frame().copy()
+    validation["label"] = 1 - validation["label"]
+    _, evidence, reports = _worker(
+        monkeypatch, tmp_path, _frame(), validation=_Shard(validation)
+    )
+    config = _config(evidence)
+    config.update(
+        input_roles=["train", "validation"],
+        num_boost_round=3,
+        early_stopping_rounds=2,
+        maximize=True,
+        selection_metric="auc",
+        checkpoint_interval_rounds=interval,
+        invocation="fit",
+        plan_id="plan",
+    )
+    config["params"]["eval_metric"] = ("error@0.5", "auc")
+    monkeypatch.setattr(train, "get_checkpoint", lambda: None)
+
+    algorithm._train_loop(config)
+    assert reports[0]["metrics"]["selection_metric"] == "validation-auc"
+    assert np.isfinite(reports[0]["metrics"]["validation-error"])
+
+
 @pytest.mark.parametrize("metrics", [("logloss", "auc"), ("auc", "logloss")])
 def test_multiple_metrics_select_logloss_best_model(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, metrics: tuple[str, str]
@@ -450,10 +523,10 @@ def test_worker_rejects_missing_or_empty_validation_without_success(
 @pytest.mark.parametrize(
     "early,no_metrics,selection",
     [
-        (False, False, None),
-        (True, False, "multi"),
-        (False, True, None),
-        (True, False, "error@0.5"),
+        pytest.param(False, False, None, id="fixed-round"),
+        pytest.param(True, False, "multi", id="multi-metric"),
+        pytest.param(False, True, None, id="without-metric"),
+        pytest.param(True, False, "error@0.5", id="parameterized-single-metric"),
     ],
 )
 def test_worker_resumes_saved_progress_and_native_patience(

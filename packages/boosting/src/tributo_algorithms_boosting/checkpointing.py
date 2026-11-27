@@ -230,6 +230,31 @@ def read_checkpoint(
         raise AlgorithmExecutionError("XGBoost recovery checkpoint is invalid") from exc
 
 
+def early_stopping_callback(
+    *, patience: int, maximize: bool | None, selection_metric: str | None
+) -> Any:
+    """Reject duplicate reported metric names before selecting a best model."""
+    import xgboost
+
+    class UniqueMetricEarlyStopping(xgboost.callback.EarlyStopping):
+        def after_iteration(self, model: Any, epoch: int, evals_log: Any) -> bool:
+            if epoch == 0:
+                for metric, scores in evals_log.get("validation", {}).items():
+                    if len(scores) > 1:
+                        raise AlgorithmExecutionError(
+                            f"XGBoost evaluation metrics have duplicate reported name {metric!r}"
+                        )
+            return bool(super().after_iteration(model, epoch, evals_log))
+
+    return UniqueMetricEarlyStopping(
+        rounds=patience,
+        data_name="validation",
+        metric_name=selection_metric,
+        maximize=maximize,
+        save_best=True,
+    )
+
+
 def training_callback(
     *,
     dtrain: Any,
@@ -262,12 +287,10 @@ def training_callback(
             self.stopped = False
             self.full_model = b""
             self.early = (
-                xgboost.callback.EarlyStopping(
-                    rounds=patience,
-                    data_name="validation",
-                    metric_name=selection_metric,
+                early_stopping_callback(
+                    patience=patience,
+                    selection_metric=selection_metric,
                     maximize=maximize,
-                    save_best=True,
                 )
                 if patience is not None
                 else None

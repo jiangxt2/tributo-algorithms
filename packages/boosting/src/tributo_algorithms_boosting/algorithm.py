@@ -63,6 +63,7 @@ def _train_loop(config: dict[str, Any]) -> None:
 
     from tributo_algorithms_boosting.checkpointing import (
         REPORT_KEY,
+        early_stopping_callback,
         read_checkpoint,
         recovery_identity,
         training_callback,
@@ -206,12 +207,10 @@ def _train_loop(config: dict[str, Any]) -> None:
                 callbacks.append(state)
             elif patience is not None:
                 callbacks.append(
-                    xgboost.callback.EarlyStopping(
-                        rounds=patience,
-                        data_name="validation",
-                        metric_name=selection_metric,
+                    early_stopping_callback(
+                        patience=patience,
+                        selection_metric=selection_metric,
                         maximize=maximize,
-                        save_best=True,
                     )
                 )
             evals = [(matrices[role], role) for role in roles]
